@@ -61,39 +61,75 @@ class VMTestMeasurements:
     
     @staticmethod
     def skewness(values):
-        """Calculate skewness of a distribution"""
+        """
+        Calculate sample skewness with proper bias correction
+        Uses the adjusted Fisher-Pearson standardized moment coefficient
+        """
         if not values or len(values) < 3:
-            return 0
+            return 0.0
+        
         n = len(values)
-        mean_val = VMTestMeasurements.mean(values)
-        std = VMTestMeasurements.std_dev(values, mean_val)
-        if std == 0:
-            return 0
+        mean_val = sum(values) / n
         
-        skew = sum((x - mean_val) ** 3 for x in values) / n
-        skew = skew / (std ** 3)
+        # Calculate sample variance (with n-1 denominator)
+        variance = sum((x - mean_val) ** 2 for x in values) / (n - 1)
+        if variance <= 0:
+            return 0.0
         
-        # Apply bias correction
+        std_dev = math.sqrt(variance)
+        
+        # Calculate third moment about the mean
+        m3 = sum((x - mean_val) ** 3 for x in values) / n
+        
+        # Sample skewness (biased)
+        skew_biased = m3 / (std_dev ** 3)
+        
+        # Apply bias correction for sample skewness
+        # Formula: G1 = [(n)/(n-1)(n-2)] * [(Σ(xi-x̄)³/n) / s³]
         if n > 2:
-            skew = skew * math.sqrt(n * (n - 1)) / (n - 2)
+            adjustment = math.sqrt(n * (n - 1)) / (n - 2)
+            skew_corrected = skew_biased * adjustment
+        else:
+            skew_corrected = skew_biased
         
-        return skew
+        return skew_corrected
     
     @staticmethod
     def kurtosis(values):
-        """Calculate kurtosis of a distribution (excess kurtosis)"""
+        """
+        Calculate sample excess kurtosis with proper bias correction
+        Uses the adjusted Fisher coefficient
+        """
         if not values or len(values) < 4:
-            return 0
+            return 0.0
+        
         n = len(values)
-        mean_val = VMTestMeasurements.mean(values)
-        std = VMTestMeasurements.std_dev(values, mean_val)
-        if std == 0:
-            return 0
+        mean_val = sum(values) / n
         
-        kurt = sum((x - mean_val) ** 4 for x in values) / n
-        kurt = kurt / (std ** 4) - 3  # Excess kurtosis
+        # Calculate sample variance (with n-1 denominator)
+        variance = sum((x - mean_val) ** 2 for x in values) / (n - 1)
+        if variance <= 0:
+            return 0.0
         
-        return kurt
+        std_dev = math.sqrt(variance)
+        
+        # Calculate fourth moment about the mean
+        m4 = sum((x - mean_val) ** 4 for x in values) / n
+        
+        # Sample kurtosis (biased)
+        kurt_biased = m4 / (variance ** 2) - 3.0  # Excess kurtosis
+        
+        # Apply bias correction for sample kurtosis
+        # Formula: G2 = [(n-1)/((n-2)(n-3))] * [(n+1)*K + 6]
+        # where K is the biased kurtosis
+        if n > 3:
+            factor1 = (n - 1) / ((n - 2) * (n - 3))
+            factor2 = (n + 1) * kurt_biased + 6
+            kurt_corrected = factor1 * factor2
+        else:
+            kurt_corrected = kurt_biased
+        
+        return kurt_corrected    
     
     @staticmethod
     def shannon_entropy(values, bins=20):
@@ -315,6 +351,8 @@ class VMTestMeasurements:
             self.measurements['TIMING_CONSECUTIVE_MEAN'] = float(self.mean(consecutive_timings))
             self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = float(self.variance(consecutive_timings))
             self.measurements['TIMING_CONSECUTIVE_CV'] = float(self.coefficient_of_variation(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_SKEWNESS'] = float(self.skewness(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_KURTOSIS'] = float(self.kurtosis(consecutive_timings))
             
             return consecutive_timings
         except Exception as e:

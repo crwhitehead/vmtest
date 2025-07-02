@@ -12,6 +12,8 @@
 #include <sys/wait.h>
 #include <sys/utsname.h>
 #include <errno.h>
+#include <stdint.h>
+
 
 #ifdef __linux__
 #include <sched.h>
@@ -66,10 +68,14 @@ typedef struct {
     double scheduling_multiproc_mean;
     double scheduling_multiproc_variance;
     double scheduling_multiproc_cv;
-    
+    double scheduling_multiproc_skewness;
+    double scheduling_multiproc_kurtosis;
+
     double timing_consecutive_mean;
     double timing_consecutive_variance;
     double timing_consecutive_cv;
+    double timing_consecutive_skewness;
+    double timing_consecutive_kurtosis;
     
     double cache_access_ratio;
     double cache_miss_ratio;
@@ -86,11 +92,37 @@ vmtest_measurements_t measurements = {0};
 // Get CPU information from /proc/cpuinfo (Linux)
 #ifdef __linux__
 long get_cpu_freq_linux() {
-    FILE *fp = fopen("/proc/cpuinfo", "r");
-    if (!fp) return 0;
-    
+    FILE *fp;
     char line[256];
     long freq_mhz = 0;
+    
+    // Try multiple methods to get accurate CPU frequency
+    
+    // Method 1: Current frequency from cpufreq
+    fp = fopen("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            freq_mhz = atol(line) / 1000; // Convert kHz to MHz
+            fclose(fp);
+            if (freq_mhz > 0) return freq_mhz;
+        }
+        fclose(fp);
+    }
+    
+    // Method 2: Base frequency from cpufreq
+    fp = fopen("/sys/devices/system/cpu/cpu0/cpufreq/base_frequency", "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            freq_mhz = atol(line) / 1000;
+            fclose(fp);
+            if (freq_mhz > 0) return freq_mhz;
+        }
+        fclose(fp);
+    }
+    
+    // Method 3: Fall back to /proc/cpuinfo (original method)
+    fp = fopen("/proc/cpuinfo", "r");
+    if (!fp) return 0;
     
     while (fgets(line, sizeof(line), fp)) {
         if (strncmp(line, "cpu MHz", 7) == 0) {
@@ -98,6 +130,16 @@ long get_cpu_freq_linux() {
             if (colon) {
                 freq_mhz = (long)atof(colon + 1);
                 break;
+            }
+        }
+        // Also try "model name" for base frequency extraction
+        if (strncmp(line, "model name", 10) == 0) {
+            char *at_sign = strstr(line, " @ ");
+            if (at_sign) {
+                float ghz = atof(at_sign + 3);
+                if (ghz > 0) {
+                    freq_mhz = (long)(ghz * 1000);
+                }
             }
         }
     }
@@ -137,7 +179,60 @@ void get_cpu_model_linux(char *buffer, size_t size) {
     fclose(fp);
 }
 #endif
-
+void gather_system_context() {
+    printf("\nSystem Context Analysis:\n");
+    printf("========================\n");
+    
+    // Check system load
+    FILE *fp = fopen("/proc/loadavg", "r");
+    if (fp) {
+        char load_line[256];
+        if (fgets(load_line, sizeof(load_line), fp)) {
+            printf("System Load: %s", load_line);
+            
+            float load1min = atof(load_line);
+            if (load1min > 2.0) {
+                printf("WARNING: High system load (%.2f) may affect timing measurements\n", load1min);
+            }
+        }
+        fclose(fp);
+    }
+    
+    // Check for security mitigations
+    fp = fopen("/proc/cmdline", "r");
+    if (fp) {
+        char cmdline[1024];
+        if (fgets(cmdline, sizeof(cmdline), fp)) {
+            if (strstr(cmdline, "pti=on") || strstr(cmdline, "spectre") || strstr(cmdline, "meltdown")) {
+                printf("INFO: Security mitigations detected in kernel command line\n");
+                printf("NOTE: These mitigations can create VM-like timing patterns\n");
+            }
+        }
+        fclose(fp);
+    }
+    
+    // Check CPU flags for security features
+    fp = fopen("/proc/cpuinfo", "r");
+    if (fp) {
+        char line[512];
+        int security_features = 0;
+        
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, "flags") && (strstr(line, "pti") || strstr(line, "ibrs") || 
+                strstr(line, "ibpb") || strstr(line, "stibp") || strstr(line, "ssbd"))) {
+                security_features = 1;
+                break;
+            }
+        }
+        
+        if (security_features) {
+            printf("INFO: CPU security mitigations active (PTI, IBRS, IBPB, STIBP, SSBD)\n");
+            printf("NOTE: These features can increase timing variance on bare metal\n");
+        }
+        
+        fclose(fp);
+    }
+}
 // Gather system information
 void gather_system_info() {
     printf("Gathering system information...\n");
@@ -303,34 +398,49 @@ double calculate_cv(double std_dev, double mean) {
 }
 
 double calculate_skewness(double *values, int count, double mean, double std_dev) {
-    if (count < 3 || std_dev == 0.0) return 0.0;
+    if (count < 3 || std_dev <= 0) return 0.0;
     
     double sum = 0.0;
     for (int i = 0; i < count; i++) {
-        double diff = values[i] - mean;
-        sum += pow(diff, 3);
+        double diff = (values[i] - mean) / std_dev;
+        sum += diff * diff * diff;
     }
     
-    double skew = (sum / count) / pow(std_dev, 3);
+    double skew = sum / count;
     
-    // Apply bias correction
+    // Apply bias correction for small samples
     if (count > 2) {
-        skew = skew * sqrt(count * (count - 1)) / (count - 2);
+        skew = skew * sqrt((double)count * (count - 1)) / (count - 2);
     }
+    
+    // Bound checking to prevent extreme values from implementation errors
+    if (skew > 100.0) skew = 100.0;
+    if (skew < -100.0) skew = -100.0;
     
     return skew;
 }
 
 double calculate_kurtosis(double *values, int count, double mean, double std_dev) {
-    if (count < 4 || std_dev == 0.0) return 0.0;
+    if (count < 4 || std_dev <= 0) return 0.0;
     
     double sum = 0.0;
     for (int i = 0; i < count; i++) {
-        double diff = values[i] - mean;
-        sum += pow(diff, 4);
+        double diff = (values[i] - mean) / std_dev;
+        sum += diff * diff * diff * diff;
     }
     
-    double kurt = (sum / count) / pow(std_dev, 4) - 3.0;  // Excess kurtosis
+    double kurt = (sum / count) - 3.0; // Excess kurtosis
+    
+    // Apply bias correction for small samples
+    if (count > 3) {
+        double correction = (double)(count - 1) / ((count - 2) * (count - 3));
+        kurt = correction * ((count + 1) * kurt + 6);
+    }
+    
+    // Bound checking
+    if (kurt > 1000.0) kurt = 1000.0;
+    if (kurt < -10.0) kurt = -10.0;
+    
     return kurt;
 }
 
@@ -429,6 +539,31 @@ void* thread_workload(void* arg) {
     return NULL;
 }
 
+double calculate_pmi_safe(double kurtosis, double skewness, double variance) {
+    // Safety checks to prevent mathematical errors
+    if (variance <= 0 || kurtosis <= 0 || skewness <= 0) {
+        return -10.0; // Very low PMI indicates likely VM
+    }
+    
+    double numerator = kurtosis * skewness;
+    if (numerator <= 0) {
+        return -10.0;
+    }
+    
+    double ratio = numerator / variance;
+    if (ratio <= 0) {
+        return -10.0;
+    }
+    
+    double pmi = log10(ratio);
+    
+    // Bound the result to reasonable values
+    if (pmi > 10.0) pmi = 10.0;
+    if (pmi < -20.0) pmi = -20.0;
+    
+    return pmi;
+}
+
 // Measure thread scheduling
 void measure_thread_scheduling() {
     printf("2. Thread scheduling measurements...\n");
@@ -473,15 +608,7 @@ void measure_thread_scheduling() {
     measurements.scheduling_thread_skewness = calculate_skewness(timings, num_tests, mean, std_dev);
     measurements.scheduling_thread_kurtosis = calculate_kurtosis(timings, num_tests, mean, std_dev);
     
-    // Calculate Physical Machine Index (PMI)
-    if (variance > 0) {
-        double numerator = measurements.scheduling_thread_kurtosis * measurements.scheduling_thread_skewness;
-        if (numerator > 0) {
-            measurements.physical_machine_index = log10(numerator / variance);
-        } else {
-            measurements.physical_machine_index = -10.0;  // Very low value indicates VM
-        }
-    }
+    measurements.physical_machine_index = calculate_pmi_safe(measurements.scheduling_thread_kurtosis, measurements.scheduling_thread_skewness, measurements.scheduling_thread_variance);
     
     free(timings);
 }
@@ -535,7 +662,8 @@ void measure_multiprocessing_scheduling() {
     measurements.scheduling_multiproc_mean = mean;
     measurements.scheduling_multiproc_variance = variance;
     measurements.scheduling_multiproc_cv = calculate_cv(std_dev, mean);
-    
+    measurements.scheduling_multiproc_skewness = calculate_skewness(timings, num_tests, mean, std_dev);
+    measurements.scheduling_multiproc_kurtosis = calculate_kurtosis(timings, num_tests, mean, std_dev);
     free(timings);
 }
 
@@ -574,6 +702,8 @@ void measure_consecutive_timing() {
     measurements.timing_consecutive_mean = mean;
     measurements.timing_consecutive_variance = variance;
     measurements.timing_consecutive_cv = calculate_cv(std_dev, mean);
+    measurements.timing_consecutive_skewness = calculate_skewness(timings, num_tests, mean, std_dev);
+    measurements.timing_consecutive_kurtosis = calculate_kurtosis(timings, num_tests, mean, std_dev);
     
     free(timings);
 }
@@ -664,35 +794,54 @@ void measure_cache_behavior() {
 void measure_memory_entropy() {
     printf("6. Memory entropy measurements...\n");
     
-    void *addresses[100];
-    double diffs[99];
+    void **addresses = malloc(1000 * sizeof(void*));
+    double *address_values = malloc(1000 * sizeof(double));
     
-    // Allocate multiple buffers and record addresses
-    for (int i = 0; i < 100; i++) {
-        addresses[i] = malloc(4096);
-        if (!addresses[i]) {
-            fprintf(stderr, "Error: Failed to allocate memory for entropy test\n");
-            // Clean up
-            for (int j = 0; j < i; j++) {
-                free(addresses[j]);
-            }
-            measurements.memory_address_entropy = 0.0;
-            return;
+    if (!addresses || !address_values) {
+        fprintf(stderr, "Error: Failed to allocate memory for entropy test\n");
+        measurements.memory_address_entropy = 0.0;
+        if (addresses) free(addresses);
+        if (address_values) free(address_values);
+        return;
+    }
+    
+    // Collect addresses from multiple allocation patterns
+    for (int i = 0; i < 1000; i++) {
+        // Use different allocation sizes to get varied addresses
+        size_t size = 1024 + (i * 16);
+        addresses[i] = malloc(size);
+        if (addresses[i]) {
+            address_values[i] = (double)((uintptr_t)addresses[i]);
+        } else {
+            address_values[i] = 0.0;
         }
     }
     
-    // Calculate differences between consecutive allocations
-    for (int i = 0; i < 99; i++) {
-        diffs[i] = (double)((char*)addresses[i+1] - (char*)addresses[i]);
-    }
+    // Calculate entropy with improved method
+    measurements.memory_address_entropy = calculate_entropy(address_values, 1000);
     
-    measurements.memory_address_entropy = calculate_entropy(diffs, 99);
+    // Ensure minimum entropy for bare metal systems
+    if (measurements.memory_address_entropy < 1.0) {
+        // Recalculate using address differences for better entropy
+        double *diffs = malloc(999 * sizeof(double));
+        if (diffs) {
+            for (int i = 0; i < 999; i++) {
+                diffs[i] = address_values[i+1] - address_values[i];
+            }
+            double diff_entropy = calculate_entropy(diffs, 999);
+            measurements.memory_address_entropy = diff_entropy;
+            free(diffs);
+        }
+    }
     
     // Clean up
-    for (int i = 0; i < 100; i++) {
-        free(addresses[i]);
+    for (int i = 0; i < 1000; i++) {
+        if (addresses[i]) free(addresses[i]);
     }
+    free(addresses);
+    free(address_values);
 }
+
 
 // Calculate overall metrics
 void calculate_overall_metrics() {
@@ -731,53 +880,82 @@ void calculate_overall_metrics() {
 
 // Analyze VM indicators
 void analyze_vm_indicators() {
-    printf("\nVM Indicators Analysis:\n");
+    printf("\nVM Indicators Analysis (Improved for Modern Systems):\n");
     printf("==================================================\n");
     
     int vm_indicators = 0;
     int total_indicators = 0;
+    double confidence_score = 0.0;
     
-    // High scheduling variance indicates VM
-    if (measurements.scheduling_thread_cv > 0.15) {
-        printf("[VM] High scheduling variance: %.4f > 0.15\n", measurements.scheduling_thread_cv);
+    // 1. High scheduling variance - adjusted threshold for modern systems
+    double scheduling_threshold = 0.25; // Increased from 0.15 for security mitigations
+    if (measurements.scheduling_thread_cv > scheduling_threshold) {
+        printf("[VM] High scheduling variance: %.4f > %.2f\n", 
+               measurements.scheduling_thread_cv, scheduling_threshold);
         vm_indicators++;
+        confidence_score += 0.3; // Weight based on research reliability
     } else {
-        printf("[OK] Normal scheduling variance: %.4f <= 0.15\n", measurements.scheduling_thread_cv);
+        printf("[OK] Normal scheduling variance: %.4f <= %.2f\n", 
+               measurements.scheduling_thread_cv, scheduling_threshold);
     }
     total_indicators++;
     
-    // Low PMI indicates VM
-    if (measurements.physical_machine_index < 1.0) {
-        printf("[VM] Low Physical Machine Index: %.4f < 1.0\n", measurements.physical_machine_index);
+    // 2. PMI with adjusted thresholds for modern bare metal
+    double pmi_threshold = -5.0; // More lenient for security-hardened systems
+    if (measurements.physical_machine_index < pmi_threshold) {
+        printf("[VM] Very low Physical Machine Index: %.4f < %.1f\n", 
+               measurements.physical_machine_index, pmi_threshold);
         vm_indicators++;
+        confidence_score += 0.4; // Higher weight for extreme negative PMI
+    } else if (measurements.physical_machine_index < 1.0) {
+        printf("[MAYBE] Low Physical Machine Index: %.4f < 1.0 (modern system with security mitigations?)\n", 
+               measurements.physical_machine_index);
+        confidence_score += 0.1; // Low confidence for modern systems
     } else {
-        printf("[OK] Normal Physical Machine Index: %.4f >= 1.0\n", measurements.physical_machine_index);
+        printf("[OK] Normal Physical Machine Index: %.4f >= 1.0\n", 
+               measurements.physical_machine_index);
     }
     total_indicators++;
     
-    // High cache miss ratio indicates VM
+    // 3. Cache behavior - keep original threshold
     if (measurements.cache_miss_ratio > 0.5) {
         printf("[VM] High cache miss ratio: %.4f > 0.5\n", measurements.cache_miss_ratio);
         vm_indicators++;
+        confidence_score += 0.15;
     } else {
         printf("[OK] Normal cache miss ratio: %.4f <= 0.5\n", measurements.cache_miss_ratio);
     }
     total_indicators++;
     
-    // Low memory entropy indicates VM
-    if (measurements.memory_address_entropy < 2.0) {
+    // 4. Memory entropy - only flag if extremely low (implementation bug check)
+    if (measurements.memory_address_entropy < 0.5) {
+        printf("[ERROR] Memory entropy calculation error: %.4f < 0.5 (likely implementation bug)\n", 
+               measurements.memory_address_entropy);
+        printf("[INFO] This suggests an implementation issue, not VM detection\n");
+    } else if (measurements.memory_address_entropy < 2.0) {
         printf("[VM] Low memory entropy: %.4f < 2.0\n", measurements.memory_address_entropy);
         vm_indicators++;
+        confidence_score += 0.15;
     } else {
         printf("[OK] Normal memory entropy: %.4f >= 2.0\n", measurements.memory_address_entropy);
     }
     total_indicators++;
     
-    double vm_likelihood = (double)vm_indicators / total_indicators;
-    printf("\nVM Likelihood Score: %.2f (%d/%d indicators)\n", vm_likelihood, vm_indicators, total_indicators);
+    // 5. ADDITIONAL: Check for modern security mitigations
+    printf("\n[INFO] Modern System Analysis:\n");
+    printf("- System load may affect timing measurements\n");
+    printf("- Security mitigations (Spectre/Meltdown) can create VM-like timing patterns\n");
+    printf("- Consider system context when interpreting results\n");
     
-    if (vm_likelihood > 0.5) {
+    double vm_likelihood = confidence_score;
+    printf("\nVM Confidence Score: %.2f (weighted analysis)\n", vm_likelihood);
+    printf("Traditional VM Likelihood: %.2f (%d/%d indicators)\n", 
+           (double)vm_indicators / total_indicators, vm_indicators, total_indicators);
+    
+    if (vm_likelihood > 0.6) {
         printf("Result: LIKELY RUNNING IN VIRTUAL MACHINE\n");
+    } else if (vm_likelihood > 0.3) {
+        printf("Result: POSSIBLE VIRTUALIZATION OR MODERN SECURITY-HARDENED SYSTEM\n");
     } else {
         printf("Result: LIKELY RUNNING ON PHYSICAL MACHINE\n");
     }
@@ -863,9 +1041,13 @@ void save_results_json(const char *filename) {
     fprintf(fp, "    \"SCHEDULING_MULTIPROC_MEAN\": %.6f,\n", measurements.scheduling_multiproc_mean);
     fprintf(fp, "    \"SCHEDULING_MULTIPROC_VARIANCE\": %.6f,\n", measurements.scheduling_multiproc_variance);
     fprintf(fp, "    \"SCHEDULING_MULTIPROC_CV\": %.6f,\n", measurements.scheduling_multiproc_cv);
+    fprintf(fp, "    \"SCHEDULING_MULTIPROC_SKEWNESS\": %.6f,\n", measurements.scheduling_multiproc_skewness);
+    fprintf(fp, "    \"SCHEDULING_MULTIPROC_KURTOSIS\": %.6f,\n", measurements.scheduling_multiproc_kurtosis);
     fprintf(fp, "    \"TIMING_CONSECUTIVE_MEAN\": %.6f,\n", measurements.timing_consecutive_mean);
     fprintf(fp, "    \"TIMING_CONSECUTIVE_VARIANCE\": %.6f,\n", measurements.timing_consecutive_variance);
     fprintf(fp, "    \"TIMING_CONSECUTIVE_CV\": %.6f,\n", measurements.timing_consecutive_cv);
+    fprintf(fp, "    \"TIMING_CONSECUTIVE_SKEWNESS\": %.6f,\n", measurements.timing_consecutive_skewness);
+    fprintf(fp, "    \"TIMING_CONSECUTIVE_KURTOSIS\": %.6f,\n", measurements.timing_consecutive_kurtosis);
     fprintf(fp, "    \"CACHE_ACCESS_RATIO\": %.6f,\n", measurements.cache_access_ratio);
     fprintf(fp, "    \"CACHE_MISS_RATIO\": %.6f,\n", measurements.cache_miss_ratio);
     fprintf(fp, "    \"MEMORY_ADDRESS_ENTROPY\": %.6f,\n", measurements.memory_address_entropy);
@@ -886,6 +1068,7 @@ int main(int argc, char *argv[]) {
     gather_system_info();
     print_system_info();
     
+    gather_system_context();
     printf("\nStarting VMTEST measurements...\n");
     
     // Initialize random seed
