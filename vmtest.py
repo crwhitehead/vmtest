@@ -1,647 +1,553 @@
 #!/usr/bin/env python3
 """
-VM Detection Data Collection - Python Implementation
-Leverages multiprocessing, memory analysis, and system introspection for VM detection
+VMTEST Environment Measurements Script
+Extracts timing, scheduling, cache, and memory measurements to detect virtualization
+Based on research from Lin et al. (2021) and other VM detection papers
 """
 
 import time
-import statistics
-import multiprocessing as mp
 import threading
-import ctypes
+import multiprocessing
+import json
 import platform
 import os
 import sys
-import gc
+import ctypes
 import math
-import numpy as np
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import psutil
-import mmap
-import tempfile
-from threading import Barrier
-import tracemalloc
+import random
+from collections import defaultdict
 
-# ============================================================================
-# CONFIGURATION CONSTANTS - Adjust these to control test duration/accuracy
-# ============================================================================
+# Try to import psutil, but make it optional
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
-# Timing Analysis
-TIMING_ITERATIONS = 10000
-TIMING_BENCHMARK_OPS = 1000
-
-# Thread/Process Scheduling Tests
-SCHEDULING_ITERATIONS = 5000
-PROCESS_COUNT = mp.cpu_count()
-THREAD_COUNT = 8
-WORK_CYCLES = 10000
-
-# Memory Analysis Tests
-MEMORY_ITERATIONS = 2000
-MEMORY_ALLOCATION_SIZE = 4096
-MEMORY_PATTERN_SIZE = 1000000  # 1MB
-
-# Cache Simulation Tests
-CACHE_ITERATIONS = 5000
-CACHE_MEMORY_SIZE = 8 * 1024 * 1024  # 8MB
-
-# I/O and System Tests
-IO_ITERATIONS = 1000
-SYSTEM_ITERATIONS = 500
-
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
-
-def get_high_precision_time():
-    """Get highest precision time available"""
-    return time.perf_counter_ns()
-
-def calculate_statistics(values):
-    """Calculate comprehensive statistics for a list of values"""
-    if not values:
-        return {}
+class VMTestMeasurements:
+    def __init__(self, iterations=1000):
+        self.iterations = iterations
+        self.measurements = {}
     
-    mean_val = statistics.mean(values)
-    variance = statistics.variance(values) if len(values) > 1 else 0
-    std_dev = math.sqrt(variance)
+    @staticmethod
+    def mean(values):
+        """Calculate mean of a list of values"""
+        if not values:
+            return 0
+        return sum(values) / len(values)
     
-    stats = {
-        'mean': mean_val,
-        'variance': variance,
-        'std_dev': std_dev,
-        'coefficient_variation': std_dev / mean_val if mean_val != 0 else 0,
-        'min': min(values),
-        'max': max(values),
-        'range': max(values) - min(values),
-        'median': statistics.median(values)
-    }
+    @staticmethod
+    def variance(values, mean_val=None):
+        """Calculate variance of a list of values"""
+        if not values or len(values) < 2:
+            return 0
+        if mean_val is None:
+            mean_val = VMTestMeasurements.mean(values)
+        return sum((x - mean_val) ** 2 for x in values) / (len(values) - 1)
     
-    # Calculate skewness and kurtosis
-    if len(values) > 2 and std_dev > 0:
+    @staticmethod
+    def std_dev(values, mean_val=None):
+        """Calculate standard deviation"""
+        return math.sqrt(VMTestMeasurements.variance(values, mean_val))
+    
+    @staticmethod
+    def coefficient_of_variation(values):
+        """Calculate coefficient of variation (CV)"""
+        mean_val = VMTestMeasurements.mean(values)
+        if mean_val == 0:
+            return 0
+        std = VMTestMeasurements.std_dev(values, mean_val)
+        return std / mean_val
+    
+    @staticmethod
+    def skewness(values):
+        """Calculate skewness of a distribution"""
+        if not values or len(values) < 3:
+            return 0
         n = len(values)
-        skewness = sum(((x - mean_val) / std_dev) ** 3 for x in values) / n
-        kurtosis = sum(((x - mean_val) / std_dev) ** 4 for x in values) / n - 3
-        stats['skewness'] = skewness
-        stats['kurtosis'] = kurtosis
-    else:
-        stats['skewness'] = 0
-        stats['kurtosis'] = 0
+        mean_val = VMTestMeasurements.mean(values)
+        std = VMTestMeasurements.std_dev(values, mean_val)
+        if std == 0:
+            return 0
+        
+        skew = sum((x - mean_val) ** 3 for x in values) / n
+        skew = skew / (std ** 3)
+        
+        # Apply bias correction
+        if n > 2:
+            skew = skew * math.sqrt(n * (n - 1)) / (n - 2)
+        
+        return skew
     
-    return stats
-
-def benchmark_operation(operation, iterations=TIMING_BENCHMARK_OPS):
-    """Benchmark a simple operation for normalization"""
-    start = get_high_precision_time()
-    for _ in range(iterations):
-        operation()
-    end = get_high_precision_time()
-    return end - start
-
-# ============================================================================
-# 1. TIMING ANALYSIS (RDTSC equivalent in Python)
-# ============================================================================
-
-class TimingAnalyzer:
-    def __init__(self):
-        self.results = {}
+    @staticmethod
+    def kurtosis(values):
+        """Calculate kurtosis of a distribution (excess kurtosis)"""
+        if not values or len(values) < 4:
+            return 0
+        n = len(values)
+        mean_val = VMTestMeasurements.mean(values)
+        std = VMTestMeasurements.std_dev(values, mean_val)
+        if std == 0:
+            return 0
+        
+        kurt = sum((x - mean_val) ** 4 for x in values) / n
+        kurt = kurt / (std ** 4) - 3  # Excess kurtosis
+        
+        return kurt
     
-    def test_basic_timing(self):
-        """Test basic timing precision and overhead"""
-        print("=== Python Timing Analysis ===")
+    @staticmethod
+    def shannon_entropy(values, bins=20):
+        """Calculate Shannon entropy of a distribution"""
+        if not values:
+            return 0
         
-        # Benchmark: Simple operation timing
-        def simple_op():
-            x = 1 + 1
+        # Create histogram
+        min_val = min(values)
+        max_val = max(values)
+        if min_val == max_val:
+            return 0
         
-        benchmark_time = benchmark_operation(simple_op)
+        bin_width = (max_val - min_val) / bins
+        hist = [0] * bins
         
-        # Test 1: Basic timing overhead
-        basic_timings = []
-        for _ in range(TIMING_ITERATIONS):
-            start = get_high_precision_time()
-            # Minimal operation
-            x = 1
-            end = get_high_precision_time()
-            basic_timings.append(end - start)
+        for val in values:
+            bin_idx = int((val - min_val) / bin_width)
+            if bin_idx >= bins:
+                bin_idx = bins - 1
+            hist[bin_idx] += 1
         
-        # Test 2: Function call timing
-        def dummy_function():
-            pass
+        # Calculate probabilities and entropy
+        total = sum(hist)
+        entropy = 0
+        for count in hist:
+            if count > 0:
+                p = count / total
+                entropy -= p * math.log2(p)
         
-        function_timings = []
-        for _ in range(TIMING_ITERATIONS):
-            start = get_high_precision_time()
-            dummy_function()
-            end = get_high_precision_time()
-            function_timings.append(end - start)
+        return entropy
         
-        # Test 3: System call timing (equivalent to potential VM exits)
-        syscall_timings = []
-        for _ in range(TIMING_ITERATIONS):
-            start = get_high_precision_time()
-            os.getpid()  # System call
-            end = get_high_precision_time()
-            syscall_timings.append(end - start)
-        
-        # Test 4: Time.sleep precision (scheduler interaction)
-        sleep_timings = []
-        sleep_duration = 0.001  # 1ms
-        for _ in range(min(TIMING_ITERATIONS // 10, 1000)):  # Fewer iterations for sleep
-            start = get_high_precision_time()
-            time.sleep(sleep_duration)
-            end = get_high_precision_time()
-            actual_sleep = end - start
-            sleep_timings.append(actual_sleep)
-        
-        # Calculate statistics
-        basic_stats = calculate_statistics(basic_timings)
-        function_stats = calculate_statistics(function_timings)
-        syscall_stats = calculate_statistics(syscall_timings)
-        sleep_stats = calculate_statistics(sleep_timings)
-        
-        # Output results
-        print(f"TIMING_BENCHMARK_NS: {benchmark_time}")
-        print(f"TIMING_BASIC_MEAN: {basic_stats['mean']:.2f}")
-        print(f"TIMING_BASIC_VARIANCE: {basic_stats['variance']:.2f}")
-        print(f"TIMING_BASIC_CV: {basic_stats['coefficient_variation']:.6f}")
-        print(f"TIMING_BASIC_SKEWNESS: {basic_stats['skewness']:.6f}")
-        print(f"TIMING_BASIC_KURTOSIS: {basic_stats['kurtosis']:.6f}")
-        
-        print(f"TIMING_FUNCTION_MEAN: {function_stats['mean']:.2f}")
-        print(f"TIMING_FUNCTION_CV: {function_stats['coefficient_variation']:.6f}")
-        
-        print(f"TIMING_SYSCALL_MEAN: {syscall_stats['mean']:.2f}")
-        print(f"TIMING_SYSCALL_VARIANCE: {syscall_stats['variance']:.2f}")
-        print(f"TIMING_SYSCALL_CV: {syscall_stats['coefficient_variation']:.6f}")
-        
-        print(f"TIMING_SLEEP_MEAN: {sleep_stats['mean']:.2f}")
-        print(f"TIMING_SLEEP_VARIANCE: {sleep_stats['variance']:.2f}")
-        print(f"TIMING_SLEEP_ACCURACY: {sleep_stats['mean'] / (sleep_duration * 1e9):.6f}")
-        
-        print(f"TIMING_SYSCALL_RATIO: {syscall_stats['mean'] / basic_stats['mean']:.6f}")
-        print()
-        
-        self.results.update({
-            'basic_cv': basic_stats['coefficient_variation'],
-            'syscall_ratio': syscall_stats['mean'] / basic_stats['mean'],
-            'sleep_accuracy': sleep_stats['mean'] / (sleep_duration * 1e9)
-        })
-
-# ============================================================================
-# 2. MULTIPROCESSING SCHEDULING ANALYSIS
-# ============================================================================
-
-def cpu_bound_worker(process_id, iterations, work_cycles):
-    """CPU-bound worker function for multiprocessing"""
-    execution_times = []
-    
-    for i in range(iterations):
-        start = get_high_precision_time()
-        
-        # CPU-intensive work
-        result = 0
-        for j in range(work_cycles):
-            result += j * process_id
-        
-        end = get_high_precision_time()
-        execution_times.append(end - start)
-    
-    return execution_times
-
-def thread_worker(thread_id, barrier, results_list, iterations, work_cycles):
-    """Thread worker for GIL analysis"""
-    thread_times = []
-    
-    for i in range(iterations):
-        # Wait for all threads
-        barrier.wait()
-        
-        start = get_high_precision_time()
-        
-        # Python computation (affected by GIL)
-        result = sum(j * thread_id for j in range(work_cycles))
-        
-        end = get_high_precision_time()
-        thread_times.append(end - start)
-    
-    results_list.extend(thread_times)
-
-class SchedulingAnalyzer:
-    def __init__(self):
-        self.results = {}
-    
-    def test_multiprocessing_scheduling(self):
-        """Test true parallel processing scheduling"""
-        print("=== Multiprocessing Scheduling Analysis ===")
-        
-        # Benchmark single-process execution
-        benchmark_time = benchmark_operation(
-            lambda: sum(range(WORK_CYCLES)), 
-            iterations=10
-        )
-        
-        # Test multiprocessing scheduling
-        with ProcessPoolExecutor(max_workers=PROCESS_COUNT) as executor:
-            futures = []
+    def measure_timing_basic(self):
+        """Basic timing measurements with statistical analysis"""
+        try:
+            timings = []
             
-            # Submit work to all processes
-            iterations_per_process = SCHEDULING_ITERATIONS // PROCESS_COUNT
-            for process_id in range(PROCESS_COUNT):
-                future = executor.submit(
-                    cpu_bound_worker, 
-                    process_id, 
-                    iterations_per_process, 
-                    WORK_CYCLES
-                )
-                futures.append(future)
+            # CPU-bound workload
+            def cpu_workload():
+                result = 0
+                for i in range(10000):
+                    result += i * i
+                return result
             
-            # Collect results
-            all_times = []
-            for future in futures:
-                process_times = future.result()
-                all_times.extend(process_times)
-        
-        # Calculate statistics
-        mp_stats = calculate_statistics(all_times)
-        
-        print(f"MULTIPROC_BENCHMARK_NS: {benchmark_time}")
-        print(f"MULTIPROC_MEAN: {mp_stats['mean']:.2f}")
-        print(f"MULTIPROC_VARIANCE: {mp_stats['variance']:.2f}")
-        print(f"MULTIPROC_CV: {mp_stats['coefficient_variation']:.6f}")
-        print(f"MULTIPROC_SKEWNESS: {mp_stats['skewness']:.6f}")
-        print(f"MULTIPROC_KURTOSIS: {mp_stats['kurtosis']:.6f}")
-        print(f"MULTIPROC_PROCESS_COUNT: {PROCESS_COUNT}")
-        print(f"MULTIPROC_TOTAL_SAMPLES: {len(all_times)}")
-        print(f"MULTIPROC_OVERHEAD_RATIO: {mp_stats['mean'] / (benchmark_time / 10):.6f}")
-        print()
-        
-        self.results['multiproc_cv'] = mp_stats['coefficient_variation']
-    
-    def test_gil_threading_analysis(self):
-        """Test GIL behavior and thread scheduling"""
-        print("=== GIL Threading Analysis ===")
-        
-        # Test threading with GIL contention
-        barrier = Barrier(THREAD_COUNT)
-        thread_results = []
-        threads = []
-        
-        # Create and start threads
-        iterations_per_thread = SCHEDULING_ITERATIONS // THREAD_COUNT
-        for thread_id in range(THREAD_COUNT):
-            thread = threading.Thread(
-                target=thread_worker,
-                args=(thread_id, barrier, thread_results, iterations_per_thread, WORK_CYCLES)
-            )
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads
-        for thread in threads:
-            thread.join()
-        
-        # Calculate statistics
-        gil_stats = calculate_statistics(thread_results)
-        
-        print(f"GIL_MEAN: {gil_stats['mean']:.2f}")
-        print(f"GIL_VARIANCE: {gil_stats['variance']:.2f}")
-        print(f"GIL_CV: {gil_stats['coefficient_variation']:.6f}")
-        print(f"GIL_SKEWNESS: {gil_stats['skewness']:.6f}")
-        print(f"GIL_KURTOSIS: {gil_stats['kurtosis']:.6f}")
-        print(f"GIL_THREAD_COUNT: {THREAD_COUNT}")
-        print(f"GIL_TOTAL_SAMPLES: {len(thread_results)}")
-        print()
-        
-        self.results['gil_cv'] = gil_stats['coefficient_variation']
-
-# ============================================================================
-# 3. MEMORY BEHAVIOR ANALYSIS
-# ============================================================================
-
-class MemoryAnalyzer:
-    def __init__(self):
-        self.results = {}
-    
-    def test_garbage_collection_patterns(self):
-        """Analyze garbage collection timing patterns"""
-        print("=== Garbage Collection Analysis ===")
-        
-        # Enable detailed memory tracking
-        tracemalloc.start()
-        
-        # Benchmark: Simple allocation
-        def simple_alloc():
-            return [0] * 1000
-        
-        benchmark_time = benchmark_operation(simple_alloc, iterations=100)
-        
-        # Test 1: Allocation timing
-        allocation_times = []
-        allocated_objects = []
-        
-        for _ in range(MEMORY_ITERATIONS):
-            start = get_high_precision_time()
-            obj = [i for i in range(MEMORY_PATTERN_SIZE // 1000)]  # Create list
-            end = get_high_precision_time()
+            # Collect timing samples
+            for _ in range(self.iterations):
+                start = time.perf_counter_ns()
+                cpu_workload()
+                end = time.perf_counter_ns()
+                timings.append(end - start)
             
-            allocation_times.append(end - start)
-            allocated_objects.append(obj)
-        
-        # Test 2: Garbage collection timing
-        gc_times = []
-        for _ in range(min(MEMORY_ITERATIONS // 10, 100)):
-            start = get_high_precision_time()
-            collected = gc.collect()
-            end = get_high_precision_time()
-            gc_times.append(end - start)
-        
-        # Test 3: Memory deallocation patterns
-        dealloc_times = []
-        for obj in allocated_objects[:len(allocated_objects)//2]:
-            start = get_high_precision_time()
-            del obj
-            end = get_high_precision_time()
-            dealloc_times.append(end - start)
-        
-        # Clean up remaining objects
-        allocated_objects.clear()
-        
-        # Get memory statistics
-        current, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-        
-        # Calculate statistics
-        alloc_stats = calculate_statistics(allocation_times)
-        gc_stats = calculate_statistics(gc_times) if gc_times else {'mean': 0, 'variance': 0, 'coefficient_variation': 0}
-        dealloc_stats = calculate_statistics(dealloc_times)
-        
-        print(f"MEMORY_BENCHMARK_NS: {benchmark_time}")
-        print(f"MEMORY_ALLOC_MEAN: {alloc_stats['mean']:.2f}")
-        print(f"MEMORY_ALLOC_VARIANCE: {alloc_stats['variance']:.2f}")
-        print(f"MEMORY_ALLOC_CV: {alloc_stats['coefficient_variation']:.6f}")
-        print(f"MEMORY_GC_MEAN: {gc_stats['mean']:.2f}")
-        print(f"MEMORY_GC_VARIANCE: {gc_stats['variance']:.2f}")
-        print(f"MEMORY_DEALLOC_MEAN: {dealloc_stats['mean']:.2f}")
-        print(f"MEMORY_PEAK_USAGE: {peak}")
-        print(f"MEMORY_CURRENT_USAGE: {current}")
-        print()
-        
-        self.results.update({
-            'alloc_cv': alloc_stats['coefficient_variation'],
-            'gc_mean': gc_stats['mean'],
-            'peak_memory': peak
-        })
-    
-    def test_memory_mapping_patterns(self):
-        """Test memory mapping and virtual memory behavior"""
-        print("=== Memory Mapping Analysis ===")
-        
-        mmap_times = []
-        munmap_times = []
-        
-        # Create temporary files for memory mapping
-        temp_files = []
-        
-        for i in range(min(MEMORY_ITERATIONS // 10, 100)):
-            # Create temporary file
-            temp_file = tempfile.NamedTemporaryFile(delete=False)
-            temp_file.write(b'0' * MEMORY_ALLOCATION_SIZE)
-            temp_file.flush()
-            temp_files.append(temp_file)
+            # Calculate statistics
+            self.measurements['TIMING_BASIC_MEAN'] = float(self.mean(timings))
+            self.measurements['TIMING_BASIC_VARIANCE'] = float(self.variance(timings))
+            self.measurements['TIMING_BASIC_CV'] = float(self.coefficient_of_variation(timings))
+            self.measurements['TIMING_BASIC_SKEWNESS'] = float(self.skewness(timings))
+            self.measurements['TIMING_BASIC_KURTOSIS'] = float(self.kurtosis(timings))
             
-            # Test memory mapping
-            start = get_high_precision_time()
-            with open(temp_file.name, 'r+b') as f:
-                mm = mmap.mmap(f.fileno(), MEMORY_ALLOCATION_SIZE)
-                end = get_high_precision_time()
-                mmap_times.append(end - start)
+            return timings
+        except Exception as e:
+            print(f"Error in timing basic measurements: {e}")
+            # Set default values if measurement fails
+            self.measurements['TIMING_BASIC_MEAN'] = 0.0
+            self.measurements['TIMING_BASIC_VARIANCE'] = 0.0
+            self.measurements['TIMING_BASIC_CV'] = 0.0
+            self.measurements['TIMING_BASIC_SKEWNESS'] = 0.0
+            self.measurements['TIMING_BASIC_KURTOSIS'] = 0.0
+            return []
+    
+    def measure_thread_scheduling(self):
+        """Thread scheduling measurements based on Lin et al. research"""
+        try:
+            thread_timings = []
+            
+            # Shared variable for thread synchronization
+            counter = 0
+            lock = threading.Lock()
+            
+            def thread_workload():
+                nonlocal counter
+                result = 0
+                # CPU-bound work
+                for i in range(5000):
+                    result += i * i
                 
-                # Test unmapping
-                start = get_high_precision_time()
-                mm.close()
-                end = get_high_precision_time()
-                munmap_times.append(end - start)
-        
-        # Cleanup
-        for temp_file in temp_files:
-            temp_file.close()
-            os.unlink(temp_file.name)
-        
-        # Calculate statistics
-        mmap_stats = calculate_statistics(mmap_times)
-        munmap_stats = calculate_statistics(munmap_times)
-        
-        print(f"MMAP_MEAN: {mmap_stats['mean']:.2f}")
-        print(f"MMAP_VARIANCE: {mmap_stats['variance']:.2f}")
-        print(f"MMAP_CV: {mmap_stats['coefficient_variation']:.6f}")
-        print(f"MUNMAP_MEAN: {munmap_stats['mean']:.2f}")
-        print(f"MUNMAP_CV: {munmap_stats['coefficient_variation']:.6f}")
-        print()
-        
-        self.results.update({
-            'mmap_cv': mmap_stats['coefficient_variation'],
-            'munmap_cv': munmap_stats['coefficient_variation']
-        })
-
-# ============================================================================
-# 4. CACHE SIMULATION AND MEMORY ACCESS PATTERNS
-# ============================================================================
-
-class CacheAnalyzer:
-    def __init__(self):
-        self.results = {}
-    
-    def test_memory_access_patterns(self):
-        """Simulate cache behavior through memory access patterns"""
-        print("=== Memory Access Pattern Analysis ===")
-        
-        # Create large array for cache simulation
-        cache_array = np.zeros(CACHE_MEMORY_SIZE // 8, dtype=np.int64)
-        
-        # Benchmark: Sequential access
-        def sequential_access():
-            for i in range(0, len(cache_array), 1000):
-                cache_array[i] += 1
-        
-        benchmark_time = benchmark_operation(sequential_access, iterations=10)
-        
-        # Test 1: Sequential vs Random access timing
-        sequential_times = []
-        random_times = []
-        
-        for _ in range(CACHE_ITERATIONS):
-            # Sequential access
-            start = get_high_precision_time()
-            for i in range(0, min(len(cache_array), 10000), 8):  # Cache line simulation
-                cache_array[i] += 1
-            end = get_high_precision_time()
-            sequential_times.append(end - start)
+                # Brief synchronization to simulate scheduling
+                with lock:
+                    counter += 1
+                
+                return result
             
-            # Random access
-            indices = np.random.randint(0, len(cache_array), 1250)  # Same number of accesses
-            start = get_high_precision_time()
-            for idx in indices:
-                cache_array[idx] += 1
-            end = get_high_precision_time()
-            random_times.append(end - start)
-        
-        # Test 2: Stride pattern analysis (different cache behaviors)
-        stride_results = {}
-        strides = [1, 8, 64, 512, 4096]  # Different memory access patterns
-        
-        for stride in strides:
-            stride_times = []
-            for _ in range(min(CACHE_ITERATIONS // 5, 1000)):
-                start = get_high_precision_time()
-                for i in range(0, min(len(cache_array), 10000), stride):
-                    cache_array[i] += 1
-                end = get_high_precision_time()
-                stride_times.append(end - start)
-            stride_results[stride] = calculate_statistics(stride_times)
-        
-        # Calculate statistics
-        seq_stats = calculate_statistics(sequential_times)
-        rand_stats = calculate_statistics(random_times)
-        
-        print(f"CACHE_BENCHMARK_NS: {benchmark_time}")
-        print(f"CACHE_SEQUENTIAL_MEAN: {seq_stats['mean']:.2f}")
-        print(f"CACHE_SEQUENTIAL_CV: {seq_stats['coefficient_variation']:.6f}")
-        print(f"CACHE_RANDOM_MEAN: {rand_stats['mean']:.2f}")
-        print(f"CACHE_RANDOM_CV: {rand_stats['coefficient_variation']:.6f}")
-        print(f"CACHE_ACCESS_RATIO: {rand_stats['mean'] / seq_stats['mean']:.6f}")
-        
-        # Output stride analysis
-        for stride, stats in stride_results.items():
-            print(f"CACHE_STRIDE_{stride}_MEAN: {stats['mean']:.2f}")
-            print(f"CACHE_STRIDE_{stride}_CV: {stats['coefficient_variation']:.6f}")
-        
-        print()
-        
-        self.results.update({
-            'cache_ratio': rand_stats['mean'] / seq_stats['mean'],
-            'sequential_cv': seq_stats['coefficient_variation'],
-            'random_cv': rand_stats['coefficient_variation']
-        })
-
-# ============================================================================
-# 5. SYSTEM INTROSPECTION AND PLATFORM ANALYSIS
-# ============================================================================
-
-class SystemAnalyzer:
-    def __init__(self):
-        self.results = {}
+            # Run multiple thread tests
+            for _ in range(self.iterations // 10):  # Fewer iterations for thread tests
+                threads = []
+                start = time.perf_counter_ns()
+                
+                # Create and start threads
+                for _ in range(4):  # 4 threads
+                    t = threading.Thread(target=thread_workload)
+                    threads.append(t)
+                    t.start()
+                
+                # Wait for all threads
+                for t in threads:
+                    t.join()
+                
+                end = time.perf_counter_ns()
+                thread_timings.append(end - start)
+            
+            # Calculate thread scheduling statistics
+            self.measurements['SCHEDULING_THREAD_MEAN'] = float(self.mean(thread_timings))
+            self.measurements['SCHEDULING_THREAD_VARIANCE'] = float(self.variance(thread_timings))
+            self.measurements['SCHEDULING_THREAD_CV'] = float(self.coefficient_of_variation(thread_timings))
+            self.measurements['SCHEDULING_THREAD_SKEWNESS'] = float(self.skewness(thread_timings))
+            self.measurements['SCHEDULING_THREAD_KURTOSIS'] = float(self.kurtosis(thread_timings))
+            
+            # Calculate Physical Machine Index (PMI) from Lin et al.
+            # PMI = log(Kurtosis * Skewness / Variance)
+            if self.measurements['SCHEDULING_THREAD_VARIANCE'] > 0:
+                numerator = self.measurements['SCHEDULING_THREAD_KURTOSIS'] * self.measurements['SCHEDULING_THREAD_SKEWNESS']
+                if numerator > 0:
+                    pmi = math.log10(numerator / self.measurements['SCHEDULING_THREAD_VARIANCE'])
+                    self.measurements['PHYSICAL_MACHINE_INDEX'] = float(pmi)
+                else:
+                    self.measurements['PHYSICAL_MACHINE_INDEX'] = -10.0  # Very low value indicates VM
+            
+            return thread_timings
+        except Exception as e:
+            print(f"Error in thread scheduling measurements: {e}")
+            # Set default values if measurement fails
+            self.measurements['SCHEDULING_THREAD_MEAN'] = 0.0
+            self.measurements['SCHEDULING_THREAD_VARIANCE'] = 0.0
+            self.measurements['SCHEDULING_THREAD_CV'] = 0.0
+            self.measurements['SCHEDULING_THREAD_SKEWNESS'] = 0.0
+            self.measurements['SCHEDULING_THREAD_KURTOSIS'] = 0.0
+            self.measurements['PHYSICAL_MACHINE_INDEX'] = 0.0
+            return []
     
-    def analyze_system_characteristics(self):
-        """Analyze system-level characteristics that may indicate virtualization"""
-        print("=== System Characteristics Analysis ===")
+    def measure_multiprocessing_scheduling(self):
+        """Multiprocessing scheduling measurements"""
+        try:
+            proc_timings = []
+            
+            def process_workload(queue):
+                result = 0
+                for i in range(10000):
+                    result += i * i
+                queue.put(result)
+            
+            # Run multiprocessing tests
+            for _ in range(self.iterations // 20):  # Even fewer iterations
+                queue = multiprocessing.Queue()
+                processes = []
+                
+                start = time.perf_counter_ns()
+                
+                # Create and start processes
+                for _ in range(4):
+                    p = multiprocessing.Process(target=process_workload, args=(queue,))
+                    processes.append(p)
+                    p.start()
+                
+                # Wait for all processes
+                for p in processes:
+                    p.join()
+                
+                end = time.perf_counter_ns()
+                proc_timings.append(end - start)
+            
+            # Calculate multiprocessing statistics
+            self.measurements['SCHEDULING_MULTIPROC_MEAN'] = float(self.mean(proc_timings))
+            self.measurements['SCHEDULING_MULTIPROC_VARIANCE'] = float(self.variance(proc_timings))
+            self.measurements['SCHEDULING_MULTIPROC_CV'] = float(self.coefficient_of_variation(proc_timings))
+            self.measurements['SCHEDULING_MULTIPROC_SKEWNESS'] = float(self.skewness(proc_timings))
+            self.measurements['SCHEDULING_MULTIPROC_KURTOSIS'] = float(self.kurtosis(proc_timings))
+            
+            # Calculate Physical Machine Index (PMI) for multiprocessing
+            # PMI = log(Kurtosis * Skewness / Variance)
+            if self.measurements['SCHEDULING_MULTIPROC_VARIANCE'] > 0:
+                numerator = self.measurements['SCHEDULING_MULTIPROC_KURTOSIS'] * self.measurements['SCHEDULING_MULTIPROC_SKEWNESS']
+                if numerator > 0:
+                    pmi = math.log10(numerator / self.measurements['SCHEDULING_MULTIPROC_VARIANCE'])
+                    self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = float(pmi)
+                else:
+                    self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = -10.0  # Very low value indicates VM
+            else:
+                self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = 0.0
+            
+            return proc_timings
+        except Exception as e:
+            print(f"Error in multiprocessing measurements: {e}")
+            # Set default values if measurement fails
+            self.measurements['SCHEDULING_MULTIPROC_MEAN'] = 0.0
+            self.measurements['SCHEDULING_MULTIPROC_VARIANCE'] = 0.0
+            self.measurements['SCHEDULING_MULTIPROC_CV'] = 0.0
+            self.measurements['SCHEDULING_MULTIPROC_SKEWNESS'] = 0.0
+            self.measurements['SCHEDULING_MULTIPROC_KURTOSIS'] = 0.0
+            self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = 0.0
+            return []
+    
+    def measure_consecutive_timing(self):
+        """Consecutive operation timing measurements"""
+        try:
+            consecutive_timings = []
+            
+            # Measure timing of consecutive operations
+            for _ in range(self.iterations // 2):
+                times = []
+                for _ in range(10):  # 10 consecutive operations
+                    start = time.perf_counter_ns()
+                    # Simple operation
+                    _ = sum(range(1000))
+                    end = time.perf_counter_ns()
+                    times.append(end - start)
+                
+                # Calculate mean of consecutive operations
+                consecutive_timings.append(self.mean(times))
+            
+            self.measurements['TIMING_CONSECUTIVE_MEAN'] = float(self.mean(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = float(self.variance(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_CV'] = float(self.coefficient_of_variation(consecutive_timings))
+            
+            return consecutive_timings
+        except Exception as e:
+            print(f"Error in consecutive timing measurements: {e}")
+            # Set default values if measurement fails
+            self.measurements['TIMING_CONSECUTIVE_MEAN'] = 0.0
+            self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = 0.0
+            self.measurements['TIMING_CONSECUTIVE_CV'] = 0.0
+            return []
+    
+    def measure_cache_behavior(self):
+        """Cache-related measurements"""
+        try:
+            cache_timings = []
+            cache_miss_indicators = []
+            
+            # Large array to stress cache (using list instead of numpy array)
+            array_size = 1024 * 1024  # 1M elements
+            data = [random.random() for _ in range(array_size)]
+            
+            # Cache-friendly access pattern
+            for _ in range(100):
+                start = time.perf_counter_ns()
+                # Sequential access
+                total = sum(data)
+                end = time.perf_counter_ns()
+                cache_timings.append(end - start)
+            
+            # Cache-unfriendly access pattern
+            indices = list(range(len(data)))
+            random.shuffle(indices)
+            
+            for _ in range(100):
+                start = time.perf_counter_ns()
+                # Random access
+                total = 0
+                for i in range(0, len(indices), 1000):
+                    total += data[indices[i]]
+                end = time.perf_counter_ns()
+                cache_miss_indicators.append(end - start)
+            
+            # Calculate cache metrics
+            cache_friendly_mean = self.mean(cache_timings)
+            cache_unfriendly_mean = self.mean(cache_miss_indicators)
+            
+            if cache_friendly_mean > 0:
+                self.measurements['CACHE_ACCESS_RATIO'] = float(cache_unfriendly_mean / cache_friendly_mean)
+                self.measurements['CACHE_MISS_RATIO'] = float((cache_unfriendly_mean - cache_friendly_mean) / cache_friendly_mean)
+            else:
+                self.measurements['CACHE_ACCESS_RATIO'] = 1.0
+                self.measurements['CACHE_MISS_RATIO'] = 0.0
+            
+            return cache_timings, cache_miss_indicators
+        except Exception as e:
+            print(f"Error in cache behavior measurements: {e}")
+            # Set default values if measurement fails
+            self.measurements['CACHE_ACCESS_RATIO'] = 1.0
+            self.measurements['CACHE_MISS_RATIO'] = 0.0
+            return [], []
+    
+    def measure_memory_entropy(self):
+        """Memory address entropy measurements"""
+        try:
+            addresses = []
+            
+            # Allocate multiple memory regions and check their addresses
+            for _ in range(100):
+                # Allocate a buffer
+                buffer = ctypes.create_string_buffer(4096)
+                addr = ctypes.addressof(buffer)
+                addresses.append(addr)
+            
+            # Calculate entropy-related metrics
+            # Use differences between consecutive allocations
+            if len(addresses) > 1:
+                diffs = [addresses[i+1] - addresses[i] for i in range(len(addresses)-1)]
+                
+                # Shannon entropy of address differences
+                if diffs:
+                    entropy = self.shannon_entropy(diffs)
+                    self.measurements['MEMORY_ADDRESS_ENTROPY'] = float(entropy)
+                else:
+                    self.measurements['MEMORY_ADDRESS_ENTROPY'] = 0.0
+            else:
+                self.measurements['MEMORY_ADDRESS_ENTROPY'] = 0.0
+            
+            return addresses
+        except Exception as e:
+            print(f"Error in memory entropy measurements: {e}")
+            # Set default value if measurement fails
+            self.measurements['MEMORY_ADDRESS_ENTROPY'] = 0.0
+            return []
+    
+    def calculate_overall_metrics(self):
+        """Calculate overall/composite metrics"""
+        # Overall timing CV (average of all timing CVs)
+        timing_cvs = [
+            self.measurements.get('TIMING_BASIC_CV', 0),
+            self.measurements.get('TIMING_CONSECUTIVE_CV', 0)
+        ]
+        valid_timing_cvs = [cv for cv in timing_cvs if cv > 0]
+        self.measurements['OVERALL_TIMING_CV'] = float(self.mean(valid_timing_cvs)) if valid_timing_cvs else 0.0
         
-        # CPU information
-        cpu_count = mp.cpu_count()
-        cpu_freq = psutil.cpu_freq()
-        
-        # Memory information
-        memory = psutil.virtual_memory()
-        
-        # Platform information
-        platform_info = {
-            'system': platform.system(),
-            'machine': platform.machine(),
+        # Overall scheduling CV (average of scheduling CVs)
+        scheduling_cvs = [
+            self.measurements.get('SCHEDULING_THREAD_CV', 0),
+            self.measurements.get('SCHEDULING_MULTIPROC_CV', 0)
+        ]
+        valid_scheduling_cvs = [cv for cv in scheduling_cvs if cv > 0]
+        self.measurements['OVERALL_SCHEDULING_CV'] = float(self.mean(valid_scheduling_cvs)) if valid_scheduling_cvs else 0.0
+    
+    def get_system_info(self):
+        """Collect system information"""
+        info = {
+            'platform': platform.platform(),
             'processor': platform.processor(),
-            'python_implementation': platform.python_implementation(),
-            'python_version': platform.python_version()
+            'python_version': platform.python_version(),
+            'cpu_count': multiprocessing.cpu_count(),
+            'timestamp': time.time()
         }
         
-        # Performance characteristics
-        perf_tests = []
-        for _ in range(SYSTEM_ITERATIONS):
-            start = get_high_precision_time()
-            # Mixed operations that may behave differently in VMs
-            _ = os.listdir('.')
-            _ = psutil.cpu_percent()
-            end = get_high_precision_time()
-            perf_tests.append(end - start)
+        # Add psutil information if available
+        if PSUTIL_AVAILABLE:
+            try:
+                info['cpu_freq'] = psutil.cpu_freq().current if psutil.cpu_freq() else 0
+                info['memory_total'] = psutil.virtual_memory().total
+            except Exception as e:
+                print(f"Warning: Could not get psutil info: {e}")
+                info['cpu_freq'] = 0
+                info['memory_total'] = 0
+        else:
+            info['cpu_freq'] = 0
+            info['memory_total'] = 0
+            info['psutil_available'] = False
         
-        perf_stats = calculate_statistics(perf_tests)
+        return info
+    
+    def run_all_measurements(self):
+        """Run all measurement tests"""
+        print("Starting VMTEST measurements...")
         
-        print(f"SYSTEM_CPU_COUNT: {cpu_count}")
-        print(f"SYSTEM_CPU_FREQ_CURRENT: {cpu_freq.current if cpu_freq else 0}")
-        print(f"SYSTEM_MEMORY_TOTAL: {memory.total}")
-        print(f"SYSTEM_MEMORY_AVAILABLE: {memory.available}")
-        print(f"SYSTEM_PLATFORM: {platform_info['system']}")
-        print(f"SYSTEM_MACHINE: {platform_info['machine']}")
-        print(f"SYSTEM_PERF_MEAN: {perf_stats['mean']:.2f}")
-        print(f"SYSTEM_PERF_CV: {perf_stats['coefficient_variation']:.6f}")
-        print()
+        print("1. Basic timing measurements...")
+        self.measure_timing_basic()
         
-        self.results.update({
-            'cpu_count': cpu_count,
-            'memory_total': memory.total,
-            'perf_cv': perf_stats['coefficient_variation']
-        })
-
-# ============================================================================
-# MAIN EXECUTION
-# ============================================================================
+        print("2. Thread scheduling measurements...")
+        self.measure_thread_scheduling()
+        
+        print("3. Multiprocessing scheduling measurements...")
+        self.measure_multiprocessing_scheduling()
+        
+        print("4. Consecutive timing measurements...")
+        self.measure_consecutive_timing()
+        
+        print("5. Cache behavior measurements...")
+        self.measure_cache_behavior()
+        
+        print("6. Memory entropy measurements...")
+        self.measure_memory_entropy()
+        
+        print("7. Calculating overall metrics...")
+        self.calculate_overall_metrics()
+        
+        print("Measurements complete!")
+    
+    def export_results(self):
+        """Export results in standardized format"""
+        results = {
+            'system_info': self.get_system_info(),
+            'measurements': self.measurements,
+            'vm_indicators': self.analyze_vm_indicators()
+        }
+        return results
+    
+    def analyze_vm_indicators(self):
+        """Analyze measurements for VM indicators"""
+        indicators = {}
+        
+        # High scheduling variance indicates VM (Lin et al.)
+        if 'SCHEDULING_THREAD_CV' in self.measurements:
+            indicators['high_scheduling_variance'] = self.measurements['SCHEDULING_THREAD_CV'] > 0.15
+        
+        # Low PMI indicates VM
+        if 'PHYSICAL_MACHINE_INDEX' in self.measurements:
+            indicators['low_pmi'] = self.measurements['PHYSICAL_MACHINE_INDEX'] < 1.0
+        
+        # Low multiproc PMI indicates VM
+        if 'MULTIPROC_PHYSICAL_MACHINE_INDEX' in self.measurements:
+            indicators['low_multiproc_pmi'] = self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] < 1.0
+        
+        # High cache miss ratio indicates VM
+        if 'CACHE_MISS_RATIO' in self.measurements:
+            indicators['high_cache_miss'] = self.measurements['CACHE_MISS_RATIO'] > 0.5
+        
+        # Low memory entropy indicates VM
+        if 'MEMORY_ADDRESS_ENTROPY' in self.measurements:
+            indicators['low_memory_entropy'] = self.measurements['MEMORY_ADDRESS_ENTROPY'] < 2.0
+        
+        # Overall VM likelihood
+        vm_score = sum(1 for v in indicators.values() if v) / len(indicators) if indicators else 0
+        indicators['vm_likelihood_score'] = vm_score
+        indicators['likely_vm'] = vm_score > 0.5
+        
+        return indicators
 
 def main():
-    print("=== VM Detection Data Collection - Python Implementation ===")
-    print("Test Configuration:")
-    print(f"TIMING_ITERATIONS: {TIMING_ITERATIONS}")
-    print(f"SCHEDULING_ITERATIONS: {SCHEDULING_ITERATIONS}")
-    print(f"PROCESS_COUNT: {PROCESS_COUNT}")
-    print(f"THREAD_COUNT: {THREAD_COUNT}")
-    print(f"MEMORY_ITERATIONS: {MEMORY_ITERATIONS}")
-    print(f"CACHE_ITERATIONS: {CACHE_ITERATIONS}")
-    print()
+    # Parse command line arguments
+    iterations = 1000
+    if len(sys.argv) > 1:
+        try:
+            iterations = int(sys.argv[1])
+        except ValueError:
+            print(f"Invalid iterations: {sys.argv[1]}, using default: 1000")
     
-    # Initialize analyzers
-    timing_analyzer = TimingAnalyzer()
-    scheduling_analyzer = SchedulingAnalyzer()
-    memory_analyzer = MemoryAnalyzer()
-    cache_analyzer = CacheAnalyzer()
-    system_analyzer = SystemAnalyzer()
+    # Create measurement instance
+    vmtest = VMTestMeasurements(iterations=iterations)
     
-    # Run all tests
-    timing_analyzer.test_basic_timing()
-    scheduling_analyzer.test_multiprocessing_scheduling()
-    scheduling_analyzer.test_gil_threading_analysis()
-    memory_analyzer.test_garbage_collection_patterns()
-    memory_analyzer.test_memory_mapping_patterns()
-    cache_analyzer.test_memory_access_patterns()
-    system_analyzer.analyze_system_characteristics()
+    # Run measurements
+    vmtest.run_all_measurements()
     
-    # Combine all results
-    all_results = {}
-    all_results.update(timing_analyzer.results)
-    all_results.update(scheduling_analyzer.results)
-    all_results.update(memory_analyzer.results)
-    all_results.update(cache_analyzer.results)
-    all_results.update(system_analyzer.results)
+    # Export results
+    results = vmtest.export_results()
     
-    # Output summary for ML processing
-    print("=== SUMMARY FOR ML CLASSIFICATION ===")
-    print(f"OVERALL_TIMING_CV: {all_results.get('basic_cv', 0):.6f}")
-    print(f"OVERALL_MULTIPROC_CV: {all_results.get('multiproc_cv', 0):.6f}")
-    print(f"OVERALL_GIL_CV: {all_results.get('gil_cv', 0):.6f}")
-    print(f"OVERALL_MEMORY_CV: {all_results.get('alloc_cv', 0):.6f}")
-    print(f"OVERALL_CACHE_RATIO: {all_results.get('cache_ratio', 0):.6f}")
-    print(f"OVERALL_SYSCALL_RATIO: {all_results.get('syscall_ratio', 0):.6f}")
-    print(f"OVERALL_SYSTEM_PERF_CV: {all_results.get('perf_cv', 0):.6f}")
+    # Print results in JSON format
+    print("\n" + "="*60)
+    print("VMTEST MEASUREMENT RESULTS")
+    print("="*60)
+    print(json.dumps(results, indent=2))
     
-    # Calculate composite detection confidence
-    cv_metrics = [
-        all_results.get('basic_cv', 0),
-        all_results.get('multiproc_cv', 0),
-        all_results.get('gil_cv', 0),
-        all_results.get('alloc_cv', 0)
-    ]
-    
-    avg_cv = statistics.mean([cv for cv in cv_metrics if cv > 0])
-    print(f"DETECTION_CONFIDENCE: {avg_cv:.6f}")
-    
-    print(f"PYTHON_IMPLEMENTATION: {platform.python_implementation()}")
-    print(f"PYTHON_VERSION: {platform.python_version()}")
+    # Save to file
+    filename = f"vmtest_results_{int(time.time())}.json"
+    with open(filename, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\nResults saved to: {filename}")
 
 if __name__ == "__main__":
     main()

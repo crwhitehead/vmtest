@@ -1,587 +1,917 @@
-/*
-# Compile with optimization and threading support
-gcc -O2 -march=native -pthread -lm vm_detection.c -o vm_detection
 
-# Run and capture output for ML processing
-./vm_detection > vm_detection_data.txt
-
-*/
-
-
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <pthread.h>
 #include <math.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <intrin.h>
-#else
-#include <x86intrin.h>
+#include <pthread.h>
+#include <unistd.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/utsname.h>
+#include <errno.h>
+
+#ifdef __linux__
+#include <sched.h>
+#include <sys/sysinfo.h>
 #endif
 
-// ============================================================================
-// CONFIGURATION CONSTANTS - Adjust these to control test duration/accuracy
-// ============================================================================
-
-// RDTSC Timing Tests
-#define RDTSC_ITERATIONS 10000
-#define RDTSC_BENCHMARK_OPS 1000
-
-// Thread Scheduling Tests  
-#define THREAD_ITERATIONS 5000
-#define THREAD_COUNT 8
-#define THREAD_WORK_CYCLES 10000
-
-// Cache Behavior Tests
-#define CACHE_ITERATIONS 5000
-#define CACHE_MEMORY_SIZE (8 * 1024 * 1024)  // 8MB
-#define CACHE_LINE_SIZE 64
-
-// Memory Allocation Tests
-#define MEMORY_ITERATIONS 2000
-#define MEMORY_ALLOCATION_SIZE 4096
-#define MEMORY_PATTERN_SIZE 1000
-
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
-
-// High precision timing
-static inline uint64_t get_timestamp(void) {
-#ifdef _WIN32
-    return __rdtsc();
-#else
-    return __rdtsc();
+#ifdef __APPLE__
+#include <sys/sysctl.h>
 #endif
-}
 
-// Get wall clock time in nanoseconds
-uint64_t get_wall_time_ns(void) {
+#define ITERATIONS 1000
+#define THREAD_COUNT 4
+#define CACHE_SIZE (1024 * 1024)  // 1MB
+// Utility function to get high-resolution time in nanoseconds
+static inline long long get_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}// Structure to hold system information
+typedef struct {
+    char platform[256];
+    char hostname[256];
+    char kernel_version[256];
+    char machine[256];
+    int cpu_count;
+    long total_memory;
+    long cpu_freq_mhz;
+} system_info_t;
+
+// Global system info
+system_info_t system_info = {0};/*
+ * VMTEST Environment Measurements - C Version
+ * Extracts timing, scheduling, cache, and memory measurements to detect virtualization
+ * Based on research from Lin et al. (2021) and other VM detection papers
+ */
+
+// Structure to hold all measurements
+typedef struct {
+    double timing_basic_mean;
+    double timing_basic_variance;
+    double timing_basic_cv;
+    double timing_basic_skewness;
+    double timing_basic_kurtosis;
+    
+    double scheduling_thread_mean;
+    double scheduling_thread_variance;
+    double scheduling_thread_cv;
+    double scheduling_thread_skewness;
+    double scheduling_thread_kurtosis;
+    double physical_machine_index;
+    
+    double scheduling_multiproc_mean;
+    double scheduling_multiproc_variance;
+    double scheduling_multiproc_cv;
+    
+    double timing_consecutive_mean;
+    double timing_consecutive_variance;
+    double timing_consecutive_cv;
+    
+    double cache_access_ratio;
+    double cache_miss_ratio;
+    
+    double memory_address_entropy;
+    
+    double overall_timing_cv;
+    double overall_scheduling_cv;
+} vmtest_measurements_t;
+
+// Global measurements structure
+vmtest_measurements_t measurements = {0};
+
+// Get CPU information from /proc/cpuinfo (Linux)
+#ifdef __linux__
+long get_cpu_freq_linux() {
+    FILE *fp = fopen("/proc/cpuinfo", "r");
+    if (!fp) return 0;
+    
+    char line[256];
+    long freq_mhz = 0;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "cpu MHz", 7) == 0) {
+            char *colon = strchr(line, ':');
+            if (colon) {
+                freq_mhz = (long)atof(colon + 1);
+                break;
+            }
+        }
+    }
+    
+    fclose(fp);
+    return freq_mhz;
 }
 
-// Statistical calculation functions
-double calculate_mean(uint64_t* values, int count) {
-    uint64_t sum = 0;
+// Get CPU model from /proc/cpuinfo (Linux)
+void get_cpu_model_linux(char *buffer, size_t size) {
+    FILE *fp = fopen("/proc/cpuinfo", "r");
+    if (!fp) {
+        strncpy(buffer, "Unknown", size);
+        return;
+    }
+    
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "model name", 10) == 0) {
+            char *colon = strchr(line, ':');
+            if (colon) {
+                // Skip whitespace after colon
+                colon++;
+                while (*colon == ' ' || *colon == '\t') colon++;
+                
+                // Remove newline
+                char *newline = strchr(colon, '\n');
+                if (newline) *newline = '\0';
+                
+                strncpy(buffer, colon, size);
+                buffer[size-1] = '\0';
+                break;
+            }
+        }
+    }
+    
+    fclose(fp);
+}
+#endif
+
+// Gather system information
+void gather_system_info() {
+    printf("Gathering system information...\n");
+    
+    // Get basic system info using uname
+    struct utsname uts;
+    if (uname(&uts) == 0) {
+        snprintf(system_info.platform, sizeof(system_info.platform), 
+                 "%s %s", uts.sysname, uts.release);
+        strncpy(system_info.hostname, uts.nodename, sizeof(system_info.hostname));
+        strncpy(system_info.kernel_version, uts.version, sizeof(system_info.kernel_version));
+        strncpy(system_info.machine, uts.machine, sizeof(system_info.machine));
+    }
+    
+    // Get CPU count
+    system_info.cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+    
+    // Get memory information
+#ifdef __linux__
+    struct sysinfo si;
+    if (sysinfo(&si) == 0) {
+        system_info.total_memory = si.totalram;
+    }
+    
+    // Get CPU frequency
+    system_info.cpu_freq_mhz = get_cpu_freq_linux();
+    
+#elif defined(__APPLE__)
+    // macOS specific code
+    size_t size = sizeof(system_info.total_memory);
+    sysctlbyname("hw.memsize", &system_info.total_memory, &size, NULL, 0);
+    
+    size_t freq_size = sizeof(system_info.cpu_freq_mhz);
+    uint64_t freq;
+    if (sysctlbyname("hw.cpufrequency", &freq, &freq_size, NULL, 0) == 0) {
+        system_info.cpu_freq_mhz = freq / 1000000;  // Convert Hz to MHz
+    }
+#else
+    // Generic fallback
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && page_size > 0) {
+        system_info.total_memory = pages * page_size;
+    }
+#endif
+}
+
+// Print system information
+void print_system_info() {
+    printf("\n==================================================\n");
+    printf("SYSTEM INFORMATION\n");
+    printf("==================================================\n");
+    
+    printf("Platform: %s\n", system_info.platform);
+    printf("Hostname: %s\n", system_info.hostname);
+    printf("Machine: %s\n", system_info.machine);
+    printf("CPU Count: %d\n", system_info.cpu_count);
+    
+    if (system_info.total_memory > 0) {
+        printf("Total Memory: %.2f GB\n", system_info.total_memory / (1024.0 * 1024.0 * 1024.0));
+    }
+    
+    if (system_info.cpu_freq_mhz > 0) {
+        printf("CPU Frequency: %ld MHz\n", system_info.cpu_freq_mhz);
+    }
+    
+#ifdef __linux__
+    // Additional Linux-specific information
+    char cpu_model[256] = {0};
+    get_cpu_model_linux(cpu_model, sizeof(cpu_model));
+    if (strlen(cpu_model) > 0) {
+        printf("CPU Model: %s\n", cpu_model);
+    }
+    
+    // Check for common virtualization indicators
+    printf("\nVirtualization Hints:\n");
+    
+    // Check /proc/cpuinfo for hypervisor flag
+    FILE *fp = fopen("/proc/cpuinfo", "r");
+    if (fp) {
+        char line[256];
+        int found_hypervisor = 0;
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, "hypervisor")) {
+                found_hypervisor = 1;
+                break;
+            }
+        }
+        fclose(fp);
+        printf("  Hypervisor flag in /proc/cpuinfo: %s\n", 
+               found_hypervisor ? "Yes (VM likely)" : "No");
+    }
+    
+    // Check for common VM files
+    if (access("/proc/vz", F_OK) == 0) {
+        printf("  OpenVZ detected: /proc/vz exists\n");
+    }
+    if (access("/proc/xen", F_OK) == 0) {
+        printf("  Xen detected: /proc/xen exists\n");
+    }
+    
+    // Check DMI/SMBIOS info if available
+    fp = fopen("/sys/devices/virtual/dmi/id/sys_vendor", "r");
+    if (fp) {
+        char vendor[256] = {0};
+        if (fgets(vendor, sizeof(vendor), fp)) {
+            // Remove newline
+            vendor[strcspn(vendor, "\n")] = 0;
+            printf("  System Vendor: %s\n", vendor);
+            
+            // Check for known VM vendors
+            if (strstr(vendor, "VMware") || strstr(vendor, "VirtualBox") || 
+                strstr(vendor, "QEMU") || strstr(vendor, "Xen") ||
+                strstr(vendor, "Microsoft Corporation") || strstr(vendor, "innotek")) {
+                printf("  --> Known VM vendor detected!\n");
+            }
+        }
+        fclose(fp);
+    }
+    
+    fp = fopen("/sys/devices/virtual/dmi/id/product_name", "r");
+    if (fp) {
+        char product[256] = {0};
+        if (fgets(product, sizeof(product), fp)) {
+            product[strcspn(product, "\n")] = 0;
+            printf("  Product Name: %s\n", product);
+        }
+        fclose(fp);
+    }
+#endif
+    
+    time_t now = time(NULL);
+    printf("\nTimestamp: %s", ctime(&now));
+}
+
+// Statistical functions
+double calculate_mean(double *values, int count) {
+    if (count == 0) return 0.0;
+    double sum = 0.0;
     for (int i = 0; i < count; i++) {
         sum += values[i];
     }
-    return (double)sum / count;
+    return sum / count;
 }
 
-double calculate_variance(uint64_t* values, int count, double mean) {
-    double sum_sq_diff = 0.0;
+double calculate_variance(double *values, int count, double mean) {
+    if (count < 2) return 0.0;
+    double sum = 0.0;
     for (int i = 0; i < count; i++) {
         double diff = values[i] - mean;
-        sum_sq_diff += diff * diff;
+        sum += diff * diff;
     }
-    return sum_sq_diff / count;
+    return sum / (count - 1);
 }
 
-double calculate_skewness(uint64_t* values, int count, double mean, double variance) {
-    double sum_cubed_diff = 0.0;
-    double std_dev = sqrt(variance);
+double calculate_std_dev(double variance) {
+    return sqrt(variance);
+}
+
+double calculate_cv(double std_dev, double mean) {
+    if (mean == 0.0) return 0.0;
+    return std_dev / mean;
+}
+
+double calculate_skewness(double *values, int count, double mean, double std_dev) {
+    if (count < 3 || std_dev == 0.0) return 0.0;
     
+    double sum = 0.0;
     for (int i = 0; i < count; i++) {
-        double norm_diff = (values[i] - mean) / std_dev;
-        sum_cubed_diff += norm_diff * norm_diff * norm_diff;
+        double diff = values[i] - mean;
+        sum += pow(diff, 3);
     }
-    return sum_cubed_diff / count;
+    
+    double skew = (sum / count) / pow(std_dev, 3);
+    
+    // Apply bias correction
+    if (count > 2) {
+        skew = skew * sqrt(count * (count - 1)) / (count - 2);
+    }
+    
+    return skew;
 }
 
-double calculate_kurtosis(uint64_t* values, int count, double mean, double variance) {
-    double sum_fourth_diff = 0.0;
-    double std_dev = sqrt(variance);
+double calculate_kurtosis(double *values, int count, double mean, double std_dev) {
+    if (count < 4 || std_dev == 0.0) return 0.0;
     
+    double sum = 0.0;
     for (int i = 0; i < count; i++) {
-        double norm_diff = (values[i] - mean) / std_dev;
-        double fourth_power = norm_diff * norm_diff * norm_diff * norm_diff;
-        sum_fourth_diff += fourth_power;
+        double diff = values[i] - mean;
+        sum += pow(diff, 4);
     }
-    return (sum_fourth_diff / count) - 3.0; // Excess kurtosis
+    
+    double kurt = (sum / count) / pow(std_dev, 4) - 3.0;  // Excess kurtosis
+    return kurt;
 }
 
-// ============================================================================
-// 1. RDTSC TIMING ANALYSIS
-// ============================================================================
-
-typedef struct {
-    uint64_t* raw_timings;
-    uint64_t* consecutive_diffs;
-    uint64_t* vm_exit_timings;
-    double mean_timing;
-    double variance;
-    double coefficient_variation;
-    double skewness;
-    double kurtosis;
-    uint64_t min_timing;
-    uint64_t max_timing;
-    uint64_t benchmark_time;
-} rdtsc_results_t;
-
-void test_rdtsc_basic_timing(rdtsc_results_t* results) {
-    printf("=== RDTSC Basic Timing Analysis ===\n");
+double calculate_entropy(double *values, int count) {
+    if (count == 0) return 0.0;
     
-    results->raw_timings = malloc(RDTSC_ITERATIONS * sizeof(uint64_t));
-    results->consecutive_diffs = malloc(RDTSC_ITERATIONS * sizeof(uint64_t));
-    results->vm_exit_timings = malloc(RDTSC_ITERATIONS * sizeof(uint64_t));
-    
-    // Benchmark: Simple operations timing
-    uint64_t bench_start = get_timestamp();
-    volatile int dummy = 0;
-    for (int i = 0; i < RDTSC_BENCHMARK_OPS; i++) {
-        dummy += i;
-        __asm__ volatile ("nop");
-    }
-    uint64_t bench_end = get_timestamp();
-    results->benchmark_time = bench_end - bench_start;
-    
-    // Test 1: Basic RDTSC timing
-    for (int i = 0; i < RDTSC_ITERATIONS; i++) {
-        uint64_t start = get_timestamp();
-        __asm__ volatile ("nop"); // Minimal operation
-        uint64_t end = get_timestamp();
-        results->raw_timings[i] = end - start;
+    // Find min and max
+    double min_val = values[0];
+    double max_val = values[0];
+    for (int i = 1; i < count; i++) {
+        if (values[i] < min_val) min_val = values[i];
+        if (values[i] > max_val) max_val = values[i];
     }
     
-    // Test 2: Consecutive RDTSC calls (VM overhead detection)
-    for (int i = 0; i < RDTSC_ITERATIONS; i++) {
-        uint64_t t1 = get_timestamp();
-        uint64_t t2 = get_timestamp();
-        results->consecutive_diffs[i] = t2 - t1;
+    if (min_val == max_val) return 0.0;
+    
+    // Create histogram with 20 bins
+    int bins = 20;
+    int *hist = calloc(bins, sizeof(int));
+    if (!hist) return 0.0;
+    
+    double bin_width = (max_val - min_val) / bins;
+    
+    // Fill histogram
+    for (int i = 0; i < count; i++) {
+        int bin_idx = (int)((values[i] - min_val) / bin_width);
+        if (bin_idx >= bins) bin_idx = bins - 1;
+        hist[bin_idx]++;
     }
     
-    // Test 3: Potential VM-exit triggering operations
-    for (int i = 0; i < RDTSC_ITERATIONS; i++) {
-        uint64_t start = get_timestamp();
-        
-        // CPUID instruction (may trigger VM exit)
-        uint32_t eax, ebx, ecx, edx;
-        __asm__ volatile ("cpuid"
-            : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-            : "a"(0)
-        );
-        
-        uint64_t end = get_timestamp();
-        results->vm_exit_timings[i] = end - start;
-    }
-    
-    // Calculate statistics for raw timings
-    results->mean_timing = calculate_mean(results->raw_timings, RDTSC_ITERATIONS);
-    results->variance = calculate_variance(results->raw_timings, RDTSC_ITERATIONS, results->mean_timing);
-    results->coefficient_variation = sqrt(results->variance) / results->mean_timing;
-    results->skewness = calculate_skewness(results->raw_timings, RDTSC_ITERATIONS, results->mean_timing, results->variance);
-    results->kurtosis = calculate_kurtosis(results->raw_timings, RDTSC_ITERATIONS, results->mean_timing, results->variance);
-    
-    // Find min/max
-    results->min_timing = results->raw_timings[0];
-    results->max_timing = results->raw_timings[0];
-    for (int i = 1; i < RDTSC_ITERATIONS; i++) {
-        if (results->raw_timings[i] < results->min_timing) results->min_timing = results->raw_timings[i];
-        if (results->raw_timings[i] > results->max_timing) results->max_timing = results->raw_timings[i];
-    }
-    
-    // Output results
-    printf("RDTSC_BENCHMARK_CYCLES: %lu\n", results->benchmark_time);
-    printf("RDTSC_MEAN_TIMING: %.2f\n", results->mean_timing);
-    printf("RDTSC_VARIANCE: %.2f\n", results->variance);
-    printf("RDTSC_COEFFICIENT_VARIATION: %.6f\n", results->coefficient_variation);
-    printf("RDTSC_SKEWNESS: %.6f\n", results->skewness);
-    printf("RDTSC_KURTOSIS: %.6f\n", results->kurtosis);
-    printf("RDTSC_MIN_TIMING: %lu\n", results->min_timing);
-    printf("RDTSC_MAX_TIMING: %lu\n", results->max_timing);
-    printf("RDTSC_RANGE: %lu\n", results->max_timing - results->min_timing);
-    
-    // Consecutive RDTSC statistics
-    double consec_mean = calculate_mean(results->consecutive_diffs, RDTSC_ITERATIONS);
-    double consec_var = calculate_variance(results->consecutive_diffs, RDTSC_ITERATIONS, consec_mean);
-    printf("RDTSC_CONSECUTIVE_MEAN: %.2f\n", consec_mean);
-    printf("RDTSC_CONSECUTIVE_VARIANCE: %.2f\n", consec_var);
-    
-    // VM-exit timing statistics
-    double vmexit_mean = calculate_mean(results->vm_exit_timings, RDTSC_ITERATIONS);
-    double vmexit_var = calculate_variance(results->vm_exit_timings, RDTSC_ITERATIONS, vmexit_mean);
-    printf("RDTSC_VMEXIT_MEAN: %.2f\n", vmexit_mean);
-    printf("RDTSC_VMEXIT_VARIANCE: %.2f\n", vmexit_var);
-    printf("RDTSC_VMEXIT_RATIO: %.6f\n", vmexit_mean / results->mean_timing);
-    printf("\n");
-}
-
-// ============================================================================
-// 2. THREAD SCHEDULING ANALYSIS
-// ============================================================================
-
-typedef struct {
-    int thread_id;
-    uint64_t* execution_times;
-    volatile int* sync_counter;
-    pthread_barrier_t* barrier;
-} thread_data_t;
-
-typedef struct {
-    uint64_t* all_execution_times;
-    double mean_execution;
-    double variance;
-    double coefficient_variation;
-    double skewness;
-    double kurtosis;
-    uint64_t benchmark_time;
-    int total_samples;
-} scheduling_results_t;
-
-void* worker_thread(void* arg) {
-    thread_data_t* data = (thread_data_t*)arg;
-    
-    for (int i = 0; i < THREAD_ITERATIONS; i++) {
-        // Wait for all threads to be ready
-        pthread_barrier_wait(data->barrier);
-        
-        uint64_t start = get_timestamp();
-        
-        // CPU-bound work
-        volatile int work = 0;
-        for (int j = 0; j < THREAD_WORK_CYCLES; j++) {
-            work += j * data->thread_id;
+    // Calculate entropy
+    double entropy = 0.0;
+    for (int i = 0; i < bins; i++) {
+        if (hist[i] > 0) {
+            double p = (double)hist[i] / count;
+            entropy -= p * log2(p);
         }
-        
-        // Brief yield to encourage scheduling
-        sched_yield();
-        
-        uint64_t end = get_timestamp();
-        data->execution_times[i] = end - start;
-        
-        // Increment sync counter
-        __sync_fetch_and_add(data->sync_counter, 1);
     }
+    
+    free(hist);
+    return entropy;
+}
+
+// CPU workload function
+void cpu_workload() {
+    volatile long result = 0;
+    for (int i = 0; i < 10000; i++) {
+        result += i * i;
+    }
+}
+
+// Measure basic timing
+void measure_timing_basic() {
+    printf("1. Basic timing measurements...\n");
+    
+    double *timings = malloc(ITERATIONS * sizeof(double));
+    if (!timings) {
+        fprintf(stderr, "Error: Failed to allocate memory for timings\n");
+        return;
+    }
+    
+    for (int i = 0; i < ITERATIONS; i++) {
+        long long start = get_time_ns();
+        cpu_workload();
+        long long end = get_time_ns();
+        timings[i] = (double)(end - start);
+    }
+    
+    double mean = calculate_mean(timings, ITERATIONS);
+    double variance = calculate_variance(timings, ITERATIONS, mean);
+    double std_dev = calculate_std_dev(variance);
+    
+    measurements.timing_basic_mean = mean;
+    measurements.timing_basic_variance = variance;
+    measurements.timing_basic_cv = calculate_cv(std_dev, mean);
+    measurements.timing_basic_skewness = calculate_skewness(timings, ITERATIONS, mean, std_dev);
+    measurements.timing_basic_kurtosis = calculate_kurtosis(timings, ITERATIONS, mean, std_dev);
+    
+    free(timings);
+}
+
+// Thread workload with synchronization
+pthread_mutex_t thread_mutex = PTHREAD_MUTEX_INITIALIZER;
+int thread_counter = 0;
+
+void* thread_workload(void* arg) {
+    volatile long result = 0;
+    for (int i = 0; i < 5000; i++) {
+        result += i * i;
+    }
+    
+    pthread_mutex_lock(&thread_mutex);
+    thread_counter++;
+    pthread_mutex_unlock(&thread_mutex);
     
     return NULL;
 }
 
-void test_thread_scheduling(scheduling_results_t* results) {
-    printf("=== Thread Scheduling Analysis ===\n");
+// Measure thread scheduling
+void measure_thread_scheduling() {
+    printf("2. Thread scheduling measurements...\n");
     
-    pthread_t threads[THREAD_COUNT];
-    thread_data_t thread_data[THREAD_COUNT];
-    pthread_barrier_t barrier;
-    volatile int sync_counter = 0;
-    
-    // Initialize barrier
-    pthread_barrier_init(&barrier, NULL, THREAD_COUNT);
-    
-    // Allocate memory for results
-    results->total_samples = THREAD_COUNT * THREAD_ITERATIONS;
-    results->all_execution_times = malloc(results->total_samples * sizeof(uint64_t));
-    
-    // Benchmark: Single-threaded equivalent work
-    uint64_t bench_start = get_timestamp();
-    volatile int work = 0;
-    for (int i = 0; i < THREAD_WORK_CYCLES; i++) {
-        work += i;
-    }
-    uint64_t bench_end = get_timestamp();
-    results->benchmark_time = bench_end - bench_start;
-    
-    // Setup thread data
-    for (int i = 0; i < THREAD_COUNT; i++) {
-        thread_data[i].thread_id = i;
-        thread_data[i].execution_times = malloc(THREAD_ITERATIONS * sizeof(uint64_t));
-        thread_data[i].sync_counter = &sync_counter;
-        thread_data[i].barrier = &barrier;
-    }
-    
-    // Create and run threads
-    for (int i = 0; i < THREAD_COUNT; i++) {
-        pthread_create(&threads[i], NULL, worker_thread, &thread_data[i]);
-    }
-    
-    // Wait for all threads to complete
-    for (int i = 0; i < THREAD_COUNT; i++) {
-        pthread_join(threads[i], NULL);
-    }
-    
-    // Collect all timing data
-    int idx = 0;
-    for (int i = 0; i < THREAD_COUNT; i++) {
-        for (int j = 0; j < THREAD_ITERATIONS; j++) {
-            results->all_execution_times[idx++] = thread_data[i].execution_times[j];
-        }
-    }
-    
-    // Calculate statistics
-    results->mean_execution = calculate_mean(results->all_execution_times, results->total_samples);
-    results->variance = calculate_variance(results->all_execution_times, results->total_samples, results->mean_execution);
-    results->coefficient_variation = sqrt(results->variance) / results->mean_execution;
-    results->skewness = calculate_skewness(results->all_execution_times, results->total_samples, results->mean_execution, results->variance);
-    results->kurtosis = calculate_kurtosis(results->all_execution_times, results->total_samples, results->mean_execution, results->variance);
-    
-    // Output results
-    printf("THREAD_BENCHMARK_CYCLES: %lu\n", results->benchmark_time);
-    printf("THREAD_MEAN_EXECUTION: %.2f\n", results->mean_execution);
-    printf("THREAD_VARIANCE: %.2f\n", results->variance);
-    printf("THREAD_COEFFICIENT_VARIATION: %.6f\n", results->coefficient_variation);
-    printf("THREAD_SKEWNESS: %.6f\n", results->skewness);
-    printf("THREAD_KURTOSIS: %.6f\n", results->kurtosis);
-    printf("THREAD_TOTAL_SAMPLES: %d\n", results->total_samples);
-    printf("THREAD_OVERHEAD_RATIO: %.6f\n", results->mean_execution / results->benchmark_time);
-    printf("\n");
-    
-    // Cleanup
-    for (int i = 0; i < THREAD_COUNT; i++) {
-        free(thread_data[i].execution_times);
-    }
-    pthread_barrier_destroy(&barrier);
-}
-
-// ============================================================================
-// 3. CACHE BEHAVIOR ANALYSIS
-// ============================================================================
-
-typedef struct {
-    uint64_t* cache_miss_times;
-    uint64_t* cache_hit_times;
-    uint64_t* flush_times;
-    double cache_miss_mean;
-    double cache_hit_mean;
-    double cache_ratio;
-    double flush_variance;
-    uint64_t benchmark_time;
-} cache_results_t;
-
-void test_cache_behavior(cache_results_t* results) {
-    printf("=== Cache Behavior Analysis ===\n");
-    
-    results->cache_miss_times = malloc(CACHE_ITERATIONS * sizeof(uint64_t));
-    results->cache_hit_times = malloc(CACHE_ITERATIONS * sizeof(uint64_t));
-    results->flush_times = malloc(CACHE_ITERATIONS * sizeof(uint64_t));
-    
-    // Allocate large memory buffer for cache testing
-    volatile char* cache_buffer = malloc(CACHE_MEMORY_SIZE);
-    if (!cache_buffer) {
-        printf("Failed to allocate cache test buffer\n");
+    int num_tests = ITERATIONS / 10;
+    double *timings = malloc(num_tests * sizeof(double));
+    if (!timings) {
+        fprintf(stderr, "Error: Failed to allocate memory for thread timings\n");
         return;
     }
     
-    // Benchmark: Basic memory access
-    uint64_t bench_start = get_timestamp();
-    for (int i = 0; i < 1000; i++) {
-        cache_buffer[i * CACHE_LINE_SIZE] = i;
-    }
-    uint64_t bench_end = get_timestamp();
-    results->benchmark_time = bench_end - bench_start;
-    
-    // Test 1: Cache miss timing (first access to cache lines)
-    for (int i = 0; i < CACHE_ITERATIONS; i++) {
-        int offset = (i * CACHE_LINE_SIZE) % CACHE_MEMORY_SIZE;
+    for (int test = 0; test < num_tests; test++) {
+        pthread_t threads[THREAD_COUNT];
+        thread_counter = 0;
         
-        // Ensure cache line is not present
-        __builtin___clear_cache((char*)&cache_buffer[offset], (char*)&cache_buffer[offset + CACHE_LINE_SIZE]);
+        long long start = get_time_ns();
         
-        uint64_t start = get_timestamp();
-        volatile char dummy = cache_buffer[offset]; // Force cache miss
-        uint64_t end = get_timestamp();
+        // Create and start threads
+        for (int i = 0; i < THREAD_COUNT; i++) {
+            if (pthread_create(&threads[i], NULL, thread_workload, NULL) != 0) {
+                fprintf(stderr, "Error: Failed to create thread\n");
+                continue;
+            }
+        }
         
-        results->cache_miss_times[i] = end - start;
-    }
-    
-    // Test 2: Cache hit timing (second access to same cache lines)
-    for (int i = 0; i < CACHE_ITERATIONS; i++) {
-        int offset = (i * CACHE_LINE_SIZE) % CACHE_MEMORY_SIZE;
+        // Wait for all threads
+        for (int i = 0; i < THREAD_COUNT; i++) {
+            pthread_join(threads[i], NULL);
+        }
         
-        // Prime the cache
-        volatile char prime = cache_buffer[offset];
-        
-        uint64_t start = get_timestamp();
-        volatile char dummy = cache_buffer[offset]; // Should be cache hit
-        uint64_t end = get_timestamp();
-        
-        results->cache_hit_times[i] = end - start;
+        long long end = get_time_ns();
+        timings[test] = (double)(end - start);
     }
     
-    // Test 3: Cache flush timing (VM behavior difference)
-    for (int i = 0; i < CACHE_ITERATIONS; i++) {
-        uint64_t start = get_timestamp();
-        
-        // Attempt to flush cache
-        __builtin___clear_cache((char*)cache_buffer, (char*)cache_buffer + CACHE_MEMORY_SIZE);
-        
-        uint64_t end = get_timestamp();
-        results->flush_times[i] = end - start;
+    double mean = calculate_mean(timings, num_tests);
+    double variance = calculate_variance(timings, num_tests, mean);
+    double std_dev = calculate_std_dev(variance);
+    
+    measurements.scheduling_thread_mean = mean;
+    measurements.scheduling_thread_variance = variance;
+    measurements.scheduling_thread_cv = calculate_cv(std_dev, mean);
+    measurements.scheduling_thread_skewness = calculate_skewness(timings, num_tests, mean, std_dev);
+    measurements.scheduling_thread_kurtosis = calculate_kurtosis(timings, num_tests, mean, std_dev);
+    
+    // Calculate Physical Machine Index (PMI)
+    if (variance > 0) {
+        double numerator = measurements.scheduling_thread_kurtosis * measurements.scheduling_thread_skewness;
+        if (numerator > 0) {
+            measurements.physical_machine_index = log10(numerator / variance);
+        } else {
+            measurements.physical_machine_index = -10.0;  // Very low value indicates VM
+        }
     }
     
-    // Calculate statistics
-    results->cache_miss_mean = calculate_mean(results->cache_miss_times, CACHE_ITERATIONS);
-    results->cache_hit_mean = calculate_mean(results->cache_hit_times, CACHE_ITERATIONS);
-    results->cache_ratio = results->cache_miss_mean / results->cache_hit_mean;
-    results->flush_variance = calculate_variance(results->flush_times, CACHE_ITERATIONS, 
-                                               calculate_mean(results->flush_times, CACHE_ITERATIONS));
-    
-    // Output results
-    printf("CACHE_BENCHMARK_CYCLES: %lu\n", results->benchmark_time);
-    printf("CACHE_MISS_MEAN: %.2f\n", results->cache_miss_mean);
-    printf("CACHE_HIT_MEAN: %.2f\n", results->cache_hit_mean);
-    printf("CACHE_MISS_HIT_RATIO: %.6f\n", results->cache_ratio);
-    printf("CACHE_FLUSH_VARIANCE: %.2f\n", results->flush_variance);
-    printf("CACHE_ACCESS_PATTERN: %.6f\n", results->cache_miss_mean / results->benchmark_time);
-    printf("\n");
-    
-    free((void*)cache_buffer);
+    free(timings);
 }
 
-// ============================================================================
-// 4. MEMORY ALLOCATION PATTERN ANALYSIS
-// ============================================================================
-
-typedef struct {
-    uint64_t* allocation_times;
-    uint64_t* deallocation_times;
-    uint64_t* reallocation_times;
-    uintptr_t* allocation_addresses;
-    double allocation_mean;
-    double address_entropy;
-    double fragmentation_index;
-    uint64_t benchmark_time;
-} memory_results_t;
-
-void test_memory_allocation_patterns(memory_results_t* results) {
-    printf("=== Memory Allocation Pattern Analysis ===\n");
-    
-    results->allocation_times = malloc(MEMORY_ITERATIONS * sizeof(uint64_t));
-    results->deallocation_times = malloc(MEMORY_ITERATIONS * sizeof(uint64_t));
-    results->reallocation_times = malloc(MEMORY_ITERATIONS * sizeof(uint64_t));
-    results->allocation_addresses = malloc(MEMORY_ITERATIONS * sizeof(uintptr_t));
-    
-    void** allocated_ptrs = malloc(MEMORY_ITERATIONS * sizeof(void*));
-    
-    // Benchmark: Simple allocation/deallocation
-    uint64_t bench_start = get_timestamp();
-    void* bench_ptr = malloc(MEMORY_ALLOCATION_SIZE);
-    free(bench_ptr);
-    uint64_t bench_end = get_timestamp();
-    results->benchmark_time = bench_end - bench_start;
-    
-    // Test 1: Allocation timing and address patterns
-    for (int i = 0; i < MEMORY_ITERATIONS; i++) {
-        uint64_t start = get_timestamp();
-        allocated_ptrs[i] = malloc(MEMORY_ALLOCATION_SIZE);
-        uint64_t end = get_timestamp();
-        
-        results->allocation_times[i] = end - start;
-        results->allocation_addresses[i] = (uintptr_t)allocated_ptrs[i];
+// Process workload for multiprocessing test
+void process_workload() {
+    volatile long result = 0;
+    for (int i = 0; i < 10000; i++) {
+        result += i * i;
     }
-    
-    // Test 2: Deallocation timing
-    for (int i = 0; i < MEMORY_ITERATIONS; i++) {
-        uint64_t start = get_timestamp();
-        free(allocated_ptrs[i]);
-        uint64_t end = get_timestamp();
-        
-        results->deallocation_times[i] = end - start;
-    }
-    
-    // Test 3: Reallocation patterns
-    for (int i = 0; i < MEMORY_ITERATIONS; i++) {
-        void* ptr = malloc(MEMORY_ALLOCATION_SIZE);
-        
-        uint64_t start = get_timestamp();
-        ptr = realloc(ptr, MEMORY_ALLOCATION_SIZE * 2);
-        uint64_t end = get_timestamp();
-        
-        results->reallocation_times[i] = end - start;
-        free(ptr);
-    }
-    
-    // Calculate statistics
-    results->allocation_mean = calculate_mean(results->allocation_times, MEMORY_ITERATIONS);
-    
-    // Calculate address entropy (measure of address space randomization)
-    uint64_t address_variance = 0;
-    uintptr_t min_addr = results->allocation_addresses[0];
-    uintptr_t max_addr = results->allocation_addresses[0];
-    
-    for (int i = 1; i < MEMORY_ITERATIONS; i++) {
-        if (results->allocation_addresses[i] < min_addr) min_addr = results->allocation_addresses[i];
-        if (results->allocation_addresses[i] > max_addr) max_addr = results->allocation_addresses[i];
-    }
-    
-    results->address_entropy = (double)(max_addr - min_addr) / MEMORY_ITERATIONS;
-    
-    // Calculate fragmentation index (address distribution pattern)
-    double addr_gaps_sum = 0;
-    for (int i = 1; i < MEMORY_ITERATIONS; i++) {
-        addr_gaps_sum += abs((long)(results->allocation_addresses[i] - results->allocation_addresses[i-1]));
-    }
-    results->fragmentation_index = addr_gaps_sum / MEMORY_ITERATIONS;
-    
-    // Output results
-    printf("MEMORY_BENCHMARK_CYCLES: %lu\n", results->benchmark_time);
-    printf("MEMORY_ALLOCATION_MEAN: %.2f\n", results->allocation_mean);
-    printf("MEMORY_DEALLOCATION_MEAN: %.2f\n", calculate_mean(results->deallocation_times, MEMORY_ITERATIONS));
-    printf("MEMORY_REALLOCATION_MEAN: %.2f\n", calculate_mean(results->reallocation_times, MEMORY_ITERATIONS));
-    printf("MEMORY_ADDRESS_ENTROPY: %.2f\n", results->address_entropy);
-    printf("MEMORY_FRAGMENTATION_INDEX: %.2f\n", results->fragmentation_index);
-    printf("MEMORY_ADDRESS_RANGE: %lu\n", max_addr - min_addr);
-    printf("MEMORY_ALLOCATION_VARIANCE: %.2f\n", calculate_variance(results->allocation_times, MEMORY_ITERATIONS, results->allocation_mean));
-    printf("\n");
-    
-    free(allocated_ptrs);
 }
 
-// ============================================================================
-// MAIN FUNCTION
-// ============================================================================
+// Measure multiprocessing scheduling
+void measure_multiprocessing_scheduling() {
+    printf("3. Multiprocessing scheduling measurements...\n");
+    
+    int num_tests = ITERATIONS / 20;
+    double *timings = malloc(num_tests * sizeof(double));
+    if (!timings) {
+        fprintf(stderr, "Error: Failed to allocate memory for process timings\n");
+        return;
+    }
+    
+    for (int test = 0; test < num_tests; test++) {
+        long long start = get_time_ns();
+        
+        for (int i = 0; i < THREAD_COUNT; i++) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                // Child process
+                process_workload();
+                exit(0);
+            } else if (pid < 0) {
+                fprintf(stderr, "Error: Failed to fork process\n");
+            }
+        }
+        
+        // Wait for all child processes
+        for (int i = 0; i < THREAD_COUNT; i++) {
+            wait(NULL);
+        }
+        
+        long long end = get_time_ns();
+        timings[test] = (double)(end - start);
+    }
+    
+    double mean = calculate_mean(timings, num_tests);
+    double variance = calculate_variance(timings, num_tests, mean);
+    double std_dev = calculate_std_dev(variance);
+    
+    measurements.scheduling_multiproc_mean = mean;
+    measurements.scheduling_multiproc_variance = variance;
+    measurements.scheduling_multiproc_cv = calculate_cv(std_dev, mean);
+    
+    free(timings);
+}
 
-int main(int argc, char* argv[]) {
-    printf("=== VM Detection Data Collection - C Implementation ===\n");
-    printf("Test Configuration:\n");
-    printf("RDTSC_ITERATIONS: %d\n", RDTSC_ITERATIONS);
-    printf("THREAD_ITERATIONS: %d\n", THREAD_ITERATIONS);
-    printf("THREAD_COUNT: %d\n", THREAD_COUNT);
-    printf("CACHE_ITERATIONS: %d\n", CACHE_ITERATIONS);
-    printf("MEMORY_ITERATIONS: %d\n", MEMORY_ITERATIONS);
-    printf("\n");
+// Measure consecutive timing
+void measure_consecutive_timing() {
+    printf("4. Consecutive timing measurements...\n");
     
-    // Initialize results structures
-    rdtsc_results_t rdtsc_results = {0};
-    scheduling_results_t scheduling_results = {0};
-    cache_results_t cache_results = {0};
-    memory_results_t memory_results = {0};
+    int num_tests = ITERATIONS / 2;
+    double *timings = malloc(num_tests * sizeof(double));
+    if (!timings) {
+        fprintf(stderr, "Error: Failed to allocate memory for consecutive timings\n");
+        return;
+    }
     
-    // Run all tests
-    test_rdtsc_basic_timing(&rdtsc_results);
-    test_thread_scheduling(&scheduling_results);
-    test_cache_behavior(&cache_results);
-    test_memory_allocation_patterns(&memory_results);
+    for (int test = 0; test < num_tests; test++) {
+        double times[10];
+        
+        for (int i = 0; i < 10; i++) {
+            long long start = get_time_ns();
+            // Simple operation
+            volatile long sum = 0;
+            for (int j = 0; j < 1000; j++) {
+                sum += j;
+            }
+            long long end = get_time_ns();
+            times[i] = (double)(end - start);
+        }
+        
+        timings[test] = calculate_mean(times, 10);
+    }
     
-    // Output summary for ML processing
-    printf("=== SUMMARY FOR ML CLASSIFICATION ===\n");
-    printf("OVERALL_RDTSC_CV: %.6f\n", rdtsc_results.coefficient_variation);
-    printf("OVERALL_THREAD_CV: %.6f\n", scheduling_results.coefficient_variation);
-    printf("OVERALL_CACHE_RATIO: %.6f\n", cache_results.cache_ratio);
-    printf("OVERALL_MEMORY_ENTROPY: %.2f\n", memory_results.address_entropy);
-    printf("DETECTION_CONFIDENCE: %.6f\n", 
-           (rdtsc_results.coefficient_variation + scheduling_results.coefficient_variation) / 2.0);
+    double mean = calculate_mean(timings, num_tests);
+    double variance = calculate_variance(timings, num_tests, mean);
+    double std_dev = calculate_std_dev(variance);
     
-    // Cleanup
-    free(rdtsc_results.raw_timings);
-    free(rdtsc_results.consecutive_diffs);
-    free(rdtsc_results.vm_exit_timings);
-    free(scheduling_results.all_execution_times);
-    free(cache_results.cache_miss_times);
-    free(cache_results.cache_hit_times);
-    free(cache_results.flush_times);
-    free(memory_results.allocation_times);
-    free(memory_results.deallocation_times);
-    free(memory_results.reallocation_times);
-    free(memory_results.allocation_addresses);
+    measurements.timing_consecutive_mean = mean;
+    measurements.timing_consecutive_variance = variance;
+    measurements.timing_consecutive_cv = calculate_cv(std_dev, mean);
+    
+    free(timings);
+}
+
+// Measure cache behavior
+void measure_cache_behavior() {
+    printf("5. Cache behavior measurements...\n");
+    
+    // Allocate large array
+    double *data = malloc(CACHE_SIZE * sizeof(double));
+    if (!data) {
+        fprintf(stderr, "Error: Failed to allocate memory for cache test\n");
+        measurements.cache_access_ratio = 1.0;
+        measurements.cache_miss_ratio = 0.0;
+        return;
+    }
+    
+    // Initialize with random values
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        data[i] = (double)rand() / RAND_MAX;
+    }
+    
+    // Cache-friendly access pattern
+    double cache_friendly_times[100];
+    for (int i = 0; i < 100; i++) {
+        long long start = get_time_ns();
+        double sum = 0.0;
+        for (int j = 0; j < CACHE_SIZE; j++) {
+            sum += data[j];
+        }
+        long long end = get_time_ns();
+        cache_friendly_times[i] = (double)(end - start);
+        
+        // Prevent optimization
+        if (sum == 0.0) printf("");
+    }
+    
+    // Create random indices for cache-unfriendly access
+    int *indices = malloc(CACHE_SIZE * sizeof(int));
+    if (!indices) {
+        free(data);
+        return;
+    }
+    
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        indices[i] = i;
+    }
+    
+    // Shuffle indices (Fisher-Yates shuffle)
+    for (int i = CACHE_SIZE - 1; i > 0; i--) {
+        int j = rand() % (i + 1);
+        int temp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = temp;
+    }
+    
+    // Cache-unfriendly access pattern
+    double cache_unfriendly_times[100];
+    for (int i = 0; i < 100; i++) {
+        long long start = get_time_ns();
+        double sum = 0.0;
+        for (int j = 0; j < CACHE_SIZE; j += 1000) {
+            sum += data[indices[j]];
+        }
+        long long end = get_time_ns();
+        cache_unfriendly_times[i] = (double)(end - start);
+        
+        // Prevent optimization
+        if (sum == 0.0) printf("");
+    }
+    
+    double cache_friendly_mean = calculate_mean(cache_friendly_times, 100);
+    double cache_unfriendly_mean = calculate_mean(cache_unfriendly_times, 100);
+    
+    if (cache_friendly_mean > 0) {
+        measurements.cache_access_ratio = cache_unfriendly_mean / cache_friendly_mean;
+        measurements.cache_miss_ratio = (cache_unfriendly_mean - cache_friendly_mean) / cache_friendly_mean;
+    } else {
+        measurements.cache_access_ratio = 1.0;
+        measurements.cache_miss_ratio = 0.0;
+    }
+    
+    free(data);
+    free(indices);
+}
+
+// Measure memory entropy
+void measure_memory_entropy() {
+    printf("6. Memory entropy measurements...\n");
+    
+    void *addresses[100];
+    double diffs[99];
+    
+    // Allocate multiple buffers and record addresses
+    for (int i = 0; i < 100; i++) {
+        addresses[i] = malloc(4096);
+        if (!addresses[i]) {
+            fprintf(stderr, "Error: Failed to allocate memory for entropy test\n");
+            // Clean up
+            for (int j = 0; j < i; j++) {
+                free(addresses[j]);
+            }
+            measurements.memory_address_entropy = 0.0;
+            return;
+        }
+    }
+    
+    // Calculate differences between consecutive allocations
+    for (int i = 0; i < 99; i++) {
+        diffs[i] = (double)((char*)addresses[i+1] - (char*)addresses[i]);
+    }
+    
+    measurements.memory_address_entropy = calculate_entropy(diffs, 99);
+    
+    // Clean up
+    for (int i = 0; i < 100; i++) {
+        free(addresses[i]);
+    }
+}
+
+// Calculate overall metrics
+void calculate_overall_metrics() {
+    printf("7. Calculating overall metrics...\n");
+    
+    // Overall timing CV
+    double timing_cv_sum = 0.0;
+    int timing_cv_count = 0;
+    
+    if (measurements.timing_basic_cv > 0) {
+        timing_cv_sum += measurements.timing_basic_cv;
+        timing_cv_count++;
+    }
+    if (measurements.timing_consecutive_cv > 0) {
+        timing_cv_sum += measurements.timing_consecutive_cv;
+        timing_cv_count++;
+    }
+    
+    measurements.overall_timing_cv = timing_cv_count > 0 ? timing_cv_sum / timing_cv_count : 0.0;
+    
+    // Overall scheduling CV
+    double scheduling_cv_sum = 0.0;
+    int scheduling_cv_count = 0;
+    
+    if (measurements.scheduling_thread_cv > 0) {
+        scheduling_cv_sum += measurements.scheduling_thread_cv;
+        scheduling_cv_count++;
+    }
+    if (measurements.scheduling_multiproc_cv > 0) {
+        scheduling_cv_sum += measurements.scheduling_multiproc_cv;
+        scheduling_cv_count++;
+    }
+    
+    measurements.overall_scheduling_cv = scheduling_cv_count > 0 ? scheduling_cv_sum / scheduling_cv_count : 0.0;
+}
+
+// Analyze VM indicators
+void analyze_vm_indicators() {
+    printf("\nVM Indicators Analysis:\n");
+    printf("==================================================\n");
+    
+    int vm_indicators = 0;
+    int total_indicators = 0;
+    
+    // High scheduling variance indicates VM
+    if (measurements.scheduling_thread_cv > 0.15) {
+        printf("[VM] High scheduling variance: %.4f > 0.15\n", measurements.scheduling_thread_cv);
+        vm_indicators++;
+    } else {
+        printf("[OK] Normal scheduling variance: %.4f <= 0.15\n", measurements.scheduling_thread_cv);
+    }
+    total_indicators++;
+    
+    // Low PMI indicates VM
+    if (measurements.physical_machine_index < 1.0) {
+        printf("[VM] Low Physical Machine Index: %.4f < 1.0\n", measurements.physical_machine_index);
+        vm_indicators++;
+    } else {
+        printf("[OK] Normal Physical Machine Index: %.4f >= 1.0\n", measurements.physical_machine_index);
+    }
+    total_indicators++;
+    
+    // High cache miss ratio indicates VM
+    if (measurements.cache_miss_ratio > 0.5) {
+        printf("[VM] High cache miss ratio: %.4f > 0.5\n", measurements.cache_miss_ratio);
+        vm_indicators++;
+    } else {
+        printf("[OK] Normal cache miss ratio: %.4f <= 0.5\n", measurements.cache_miss_ratio);
+    }
+    total_indicators++;
+    
+    // Low memory entropy indicates VM
+    if (measurements.memory_address_entropy < 2.0) {
+        printf("[VM] Low memory entropy: %.4f < 2.0\n", measurements.memory_address_entropy);
+        vm_indicators++;
+    } else {
+        printf("[OK] Normal memory entropy: %.4f >= 2.0\n", measurements.memory_address_entropy);
+    }
+    total_indicators++;
+    
+    double vm_likelihood = (double)vm_indicators / total_indicators;
+    printf("\nVM Likelihood Score: %.2f (%d/%d indicators)\n", vm_likelihood, vm_indicators, total_indicators);
+    
+    if (vm_likelihood > 0.5) {
+        printf("Result: LIKELY RUNNING IN VIRTUAL MACHINE\n");
+    } else {
+        printf("Result: LIKELY RUNNING ON PHYSICAL MACHINE\n");
+    }
+}
+
+// Print all measurements
+void print_measurements() {
+    printf("\n==================================================\n");
+    printf("VMTEST MEASUREMENT RESULTS\n");
+    printf("==================================================\n");
+    
+    printf("\nTiming Basic Measurements:\n");
+    printf("  Mean: %.2f ns\n", measurements.timing_basic_mean);
+    printf("  Variance: %.2f\n", measurements.timing_basic_variance);
+    printf("  CV: %.4f\n", measurements.timing_basic_cv);
+    printf("  Skewness: %.4f\n", measurements.timing_basic_skewness);
+    printf("  Kurtosis: %.4f\n", measurements.timing_basic_kurtosis);
+    
+    printf("\nThread Scheduling Measurements:\n");
+    printf("  Mean: %.2f ns\n", measurements.scheduling_thread_mean);
+    printf("  Variance: %.2f\n", measurements.scheduling_thread_variance);
+    printf("  CV: %.4f\n", measurements.scheduling_thread_cv);
+    printf("  Skewness: %.4f\n", measurements.scheduling_thread_skewness);
+    printf("  Kurtosis: %.4f\n", measurements.scheduling_thread_kurtosis);
+    printf("  Physical Machine Index: %.4f\n", measurements.physical_machine_index);
+    
+    printf("\nMultiprocessing Scheduling Measurements:\n");
+    printf("  Mean: %.2f ns\n", measurements.scheduling_multiproc_mean);
+    printf("  Variance: %.2f\n", measurements.scheduling_multiproc_variance);
+    printf("  CV: %.4f\n", measurements.scheduling_multiproc_cv);
+    
+    printf("\nConsecutive Timing Measurements:\n");
+    printf("  Mean: %.2f ns\n", measurements.timing_consecutive_mean);
+    printf("  Variance: %.2f\n", measurements.timing_consecutive_variance);
+    printf("  CV: %.4f\n", measurements.timing_consecutive_cv);
+    
+    printf("\nCache Behavior Measurements:\n");
+    printf("  Access Ratio: %.4f\n", measurements.cache_access_ratio);
+    printf("  Miss Ratio: %.4f\n", measurements.cache_miss_ratio);
+    
+    printf("\nMemory Measurements:\n");
+    printf("  Address Entropy: %.4f\n", measurements.memory_address_entropy);
+    
+    printf("\nOverall Metrics:\n");
+    printf("  Overall Timing CV: %.4f\n", measurements.overall_timing_cv);
+    printf("  Overall Scheduling CV: %.4f\n", measurements.overall_scheduling_cv);
+}
+
+// Save results to JSON file
+void save_results_json(const char *filename) {
+    FILE *fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "Error: Could not open file %s for writing\n", filename);
+        return;
+    }
+    
+    fprintf(fp, "{\n");
+    
+    // System information
+    fprintf(fp, "  \"system_info\": {\n");
+    fprintf(fp, "    \"platform\": \"%s\",\n", system_info.platform);
+    fprintf(fp, "    \"hostname\": \"%s\",\n", system_info.hostname);
+    fprintf(fp, "    \"machine\": \"%s\",\n", system_info.machine);
+    fprintf(fp, "    \"cpu_count\": %d,\n", system_info.cpu_count);
+    fprintf(fp, "    \"total_memory\": %ld,\n", system_info.total_memory);
+    fprintf(fp, "    \"cpu_freq_mhz\": %ld,\n", system_info.cpu_freq_mhz);
+    fprintf(fp, "    \"timestamp\": %ld\n", time(NULL));
+    fprintf(fp, "  },\n");
+    
+    // Measurements
+    fprintf(fp, "  \"measurements\": {\n");
+    fprintf(fp, "    \"TIMING_BASIC_MEAN\": %.6f,\n", measurements.timing_basic_mean);
+    fprintf(fp, "    \"TIMING_BASIC_VARIANCE\": %.6f,\n", measurements.timing_basic_variance);
+    fprintf(fp, "    \"TIMING_BASIC_CV\": %.6f,\n", measurements.timing_basic_cv);
+    fprintf(fp, "    \"TIMING_BASIC_SKEWNESS\": %.6f,\n", measurements.timing_basic_skewness);
+    fprintf(fp, "    \"TIMING_BASIC_KURTOSIS\": %.6f,\n", measurements.timing_basic_kurtosis);
+    fprintf(fp, "    \"SCHEDULING_THREAD_MEAN\": %.6f,\n", measurements.scheduling_thread_mean);
+    fprintf(fp, "    \"SCHEDULING_THREAD_VARIANCE\": %.6f,\n", measurements.scheduling_thread_variance);
+    fprintf(fp, "    \"SCHEDULING_THREAD_CV\": %.6f,\n", measurements.scheduling_thread_cv);
+    fprintf(fp, "    \"SCHEDULING_THREAD_SKEWNESS\": %.6f,\n", measurements.scheduling_thread_skewness);
+    fprintf(fp, "    \"SCHEDULING_THREAD_KURTOSIS\": %.6f,\n", measurements.scheduling_thread_kurtosis);
+    fprintf(fp, "    \"PHYSICAL_MACHINE_INDEX\": %.6f,\n", measurements.physical_machine_index);
+    fprintf(fp, "    \"SCHEDULING_MULTIPROC_MEAN\": %.6f,\n", measurements.scheduling_multiproc_mean);
+    fprintf(fp, "    \"SCHEDULING_MULTIPROC_VARIANCE\": %.6f,\n", measurements.scheduling_multiproc_variance);
+    fprintf(fp, "    \"SCHEDULING_MULTIPROC_CV\": %.6f,\n", measurements.scheduling_multiproc_cv);
+    fprintf(fp, "    \"TIMING_CONSECUTIVE_MEAN\": %.6f,\n", measurements.timing_consecutive_mean);
+    fprintf(fp, "    \"TIMING_CONSECUTIVE_VARIANCE\": %.6f,\n", measurements.timing_consecutive_variance);
+    fprintf(fp, "    \"TIMING_CONSECUTIVE_CV\": %.6f,\n", measurements.timing_consecutive_cv);
+    fprintf(fp, "    \"CACHE_ACCESS_RATIO\": %.6f,\n", measurements.cache_access_ratio);
+    fprintf(fp, "    \"CACHE_MISS_RATIO\": %.6f,\n", measurements.cache_miss_ratio);
+    fprintf(fp, "    \"MEMORY_ADDRESS_ENTROPY\": %.6f,\n", measurements.memory_address_entropy);
+    fprintf(fp, "    \"OVERALL_TIMING_CV\": %.6f,\n", measurements.overall_timing_cv);
+    fprintf(fp, "    \"OVERALL_SCHEDULING_CV\": %.6f\n", measurements.overall_scheduling_cv);
+    fprintf(fp, "  }\n");
+    fprintf(fp, "}\n");
+    
+    fclose(fp);
+    printf("\nResults saved to: %s\n", filename);
+}
+
+int main(int argc, char *argv[]) {
+    printf("VMTEST - Virtual Machine Detection Tool\n");
+    printf("======================================\n\n");
+    
+    // Gather system information first
+    gather_system_info();
+    print_system_info();
+    
+    printf("\nStarting VMTEST measurements...\n");
+    
+    // Initialize random seed
+    srand(time(NULL));
+    
+    // Run all measurements
+    measure_timing_basic();
+    measure_thread_scheduling();
+    measure_multiprocessing_scheduling();
+    measure_consecutive_timing();
+    measure_cache_behavior();
+    measure_memory_entropy();
+    calculate_overall_metrics();
+    
+    printf("\nMeasurements complete!\n");
+    
+    // Print results
+    print_measurements();
+    
+    // Analyze VM indicators
+    analyze_vm_indicators();
+    
+    // Save to JSON file
+    char filename[256];
+    snprintf(filename, sizeof(filename), "vmtest_results_%ld.json", time(NULL));
+    save_results_json(filename);
     
     return 0;
 }
