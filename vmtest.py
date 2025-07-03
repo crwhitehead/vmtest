@@ -1,70 +1,110 @@
 #!/usr/bin/env python3
 """
-VMTEST Environment Measurements Script
-Extracts timing, scheduling, cache, and memory measurements to detect virtualization
-Based on research from Lin et al. (2021) and other VM detection papers
+VMtest - System Measurements Tool (Pure Measurements Only)
+Extracts timing, scheduling, cache, and memory measurements
+Based on research from Lin et al. (2021) and other academic sources
+
+This version collects only raw measurements without VM detection logic
 """
 
-import time
-import threading
-import multiprocessing
-import json
-import platform
 import os
 import sys
-import ctypes
+import time
 import math
-import random
-from collections import defaultdict
+import json
+import ctypes
+import threading
+import multiprocessing
+import platform
+from datetime import datetime
 
-# Try to import psutil, but make it optional
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-
-class VMTestMeasurements:
+class VMTest:
     def __init__(self, iterations=1000):
         self.iterations = iterations
         self.measurements = {}
-    
+        self.system_info = {}
+        
+    def gather_system_info(self):
+        """Gather system information"""
+        try:
+            self.system_info = {
+                'platform': platform.platform(),
+                'processor': platform.processor(),
+                'python_version': platform.python_version(),
+                'cpu_count': os.cpu_count(),
+                'timestamp': time.time(),
+                'hostname': platform.node(),
+                'machine': platform.machine(),
+                'system': platform.system()
+            }
+            
+            # Try to get memory info
+            try:
+                import psutil
+                self.system_info['memory_total'] = psutil.virtual_memory().total
+                self.system_info['memory_available'] = psutil.virtual_memory().available
+                self.system_info['cpu_freq'] = psutil.cpu_freq().current if psutil.cpu_freq() else 0
+            except ImportError:
+                # Fallback without psutil
+                try:
+                    # Linux-specific memory info
+                    with open('/proc/meminfo', 'r') as f:
+                        for line in f:
+                            if line.startswith('MemTotal:'):
+                                # Convert KB to bytes
+                                self.system_info['memory_total'] = int(line.split()[1]) * 1024
+                                break
+                except:
+                    pass
+                    
+                # Try to get CPU frequency on Linux
+                try:
+                    with open('/proc/cpuinfo', 'r') as f:
+                        for line in f:
+                            if line.startswith('cpu MHz'):
+                                self.system_info['cpu_freq'] = float(line.split(':')[1].strip())
+                                break
+                except:
+                    pass
+                    
+        except Exception as e:
+            print(f"Error gathering system info: {e}")
+            
+    # Statistical calculation methods
     @staticmethod
     def mean(values):
-        """Calculate mean of a list of values"""
+        """Calculate mean"""
         if not values:
-            return 0
+            return 0.0
         return sum(values) / len(values)
     
     @staticmethod
-    def variance(values, mean_val=None):
-        """Calculate variance of a list of values"""
-        if not values or len(values) < 2:
-            return 0
-        if mean_val is None:
-            mean_val = VMTestMeasurements.mean(values)
+    def variance(values):
+        """Calculate sample variance"""
+        if len(values) <= 1:
+            return 0.0
+        
+        mean_val = sum(values) / len(values)
         return sum((x - mean_val) ** 2 for x in values) / (len(values) - 1)
     
     @staticmethod
-    def std_dev(values, mean_val=None):
-        """Calculate standard deviation"""
-        return math.sqrt(VMTestMeasurements.variance(values, mean_val))
-    
-    @staticmethod
     def coefficient_of_variation(values):
-        """Calculate coefficient of variation (CV)"""
-        mean_val = VMTestMeasurements.mean(values)
+        """Calculate coefficient of variation"""
+        if not values:
+            return 0.0
+        
+        mean_val = sum(values) / len(values)
         if mean_val == 0:
-            return 0
-        std = VMTestMeasurements.std_dev(values, mean_val)
-        return std / mean_val
+            return 0.0
+        
+        variance = sum((x - mean_val) ** 2 for x in values) / (len(values) - 1) if len(values) > 1 else 0
+        std_dev = math.sqrt(variance)
+        
+        return std_dev / mean_val
     
     @staticmethod
     def skewness(values):
-        """
-        Calculate sample skewness with proper bias correction
-        Uses the adjusted Fisher-Pearson standardized moment coefficient
-        """
+        """Calculate sample skewness with proper bias correction"""
         if not values or len(values) < 3:
             return 0.0
         
@@ -85,7 +125,6 @@ class VMTestMeasurements:
         skew_biased = m3 / (std_dev ** 3)
         
         # Apply bias correction for sample skewness
-        # Formula: G1 = [(n)/(n-1)(n-2)] * [(Σ(xi-x̄)³/n) / s³]
         if n > 2:
             adjustment = math.sqrt(n * (n - 1)) / (n - 2)
             skew_corrected = skew_biased * adjustment
@@ -96,10 +135,7 @@ class VMTestMeasurements:
     
     @staticmethod
     def kurtosis(values):
-        """
-        Calculate sample excess kurtosis with proper bias correction
-        Uses the adjusted Fisher coefficient
-        """
+        """Calculate sample excess kurtosis with proper bias correction"""
         if not values or len(values) < 4:
             return 0.0
         
@@ -120,50 +156,58 @@ class VMTestMeasurements:
         kurt_biased = m4 / (variance ** 2) - 3.0  # Excess kurtosis
         
         # Apply bias correction for sample kurtosis
-        # Formula: G2 = [(n-1)/((n-2)(n-3))] * [(n+1)*K + 6]
-        # where K is the biased kurtosis
         if n > 3:
-            factor1 = (n - 1) / ((n - 2) * (n - 3))
-            factor2 = (n + 1) * kurt_biased + 6
-            kurt_corrected = factor1 * factor2
+            adjustment = ((n - 1) * ((n + 1) * kurt_biased + 6)) / ((n - 2) * (n - 3))
+            kurt_corrected = adjustment
         else:
             kurt_corrected = kurt_biased
         
-        return kurt_corrected    
+        return kurt_corrected
     
-    @staticmethod
-    def shannon_entropy(values, bins=20):
-        """Calculate Shannon entropy of a distribution"""
+    def calculate_raw_pmi(self, kurtosis, skewness, variance):
+        """Calculate raw Physical Machine Index (no logarithm)"""
+        if variance <= 0:
+            return 0.0
+        return (kurtosis * skewness) / variance
+    
+    def shannon_entropy(self, values):
+        """Calculate Shannon entropy of values"""
         if not values:
-            return 0
+            return 0.0
         
-        # Create histogram
+        # Find min and max
         min_val = min(values)
         max_val = max(values)
+        
         if min_val == max_val:
-            return 0
+            return 0.0
         
+        # Create histogram with 20 bins
+        bins = 20
         bin_width = (max_val - min_val) / bins
-        hist = [0] * bins
+        histogram = [0] * bins
         
+        # Fill histogram
         for val in values:
             bin_idx = int((val - min_val) / bin_width)
             if bin_idx >= bins:
                 bin_idx = bins - 1
-            hist[bin_idx] += 1
+            histogram[bin_idx] += 1
         
-        # Calculate probabilities and entropy
-        total = sum(hist)
-        entropy = 0
-        for count in hist:
+        # Calculate entropy
+        entropy = 0.0
+        total = len(values)
+        for count in histogram:
             if count > 0:
-                p = count / total
-                entropy -= p * math.log2(p)
+                probability = count / total
+                entropy -= probability * math.log2(probability)
         
         return entropy
+    
+    def measure_basic_timing(self):
+        """Basic timing measurements"""
+        print("Measuring basic timing patterns...")
         
-    def measure_timing_basic(self):
-        """Basic timing measurements with statistical analysis"""
         try:
             timings = []
             
@@ -199,8 +243,50 @@ class VMTestMeasurements:
             self.measurements['TIMING_BASIC_KURTOSIS'] = 0.0
             return []
     
+    def measure_consecutive_timing(self):
+        """Consecutive operation timing measurements"""
+        print("Measuring consecutive timing patterns...")
+        
+        try:
+            consecutive_timings = []
+            
+            # CPU-bound workload
+            def cpu_workload():
+                result = 0
+                for i in range(10000):
+                    result += i * i
+                return result
+            
+            # Measure timing of consecutive operations
+            for _ in range(self.iterations):
+                start = time.perf_counter_ns()
+                cpu_workload()
+                cpu_workload()  # Two consecutive operations
+                end = time.perf_counter_ns()
+                consecutive_timings.append(end - start)
+            
+            # Calculate all statistics (including missing ones)
+            self.measurements['TIMING_CONSECUTIVE_MEAN'] = float(self.mean(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = float(self.variance(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_CV'] = float(self.coefficient_of_variation(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_SKEWNESS'] = float(self.skewness(consecutive_timings))
+            self.measurements['TIMING_CONSECUTIVE_KURTOSIS'] = float(self.kurtosis(consecutive_timings))
+            
+            return consecutive_timings
+        except Exception as e:
+            print(f"Error in consecutive timing measurements: {e}")
+            # Set default values if measurement fails
+            self.measurements['TIMING_CONSECUTIVE_MEAN'] = 0.0
+            self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = 0.0
+            self.measurements['TIMING_CONSECUTIVE_CV'] = 0.0
+            self.measurements['TIMING_CONSECUTIVE_SKEWNESS'] = 0.0
+            self.measurements['TIMING_CONSECUTIVE_KURTOSIS'] = 0.0
+            return []
+    
     def measure_thread_scheduling(self):
         """Thread scheduling measurements based on Lin et al. research"""
+        print("Measuring thread scheduling patterns...")
+        
         try:
             thread_timings = []
             
@@ -246,15 +332,13 @@ class VMTestMeasurements:
             self.measurements['SCHEDULING_THREAD_SKEWNESS'] = float(self.skewness(thread_timings))
             self.measurements['SCHEDULING_THREAD_KURTOSIS'] = float(self.kurtosis(thread_timings))
             
-            # Calculate Physical Machine Index (PMI) from Lin et al.
-            # PMI = log(Kurtosis * Skewness / Variance)
-            if self.measurements['SCHEDULING_THREAD_VARIANCE'] > 0:
-                numerator = self.measurements['SCHEDULING_THREAD_KURTOSIS'] * self.measurements['SCHEDULING_THREAD_SKEWNESS']
-                if numerator > 0:
-                    pmi = math.log10(numerator / self.measurements['SCHEDULING_THREAD_VARIANCE'])
-                    self.measurements['PHYSICAL_MACHINE_INDEX'] = float(pmi)
-                else:
-                    self.measurements['PHYSICAL_MACHINE_INDEX'] = -10.0  # Very low value indicates VM
+            # Calculate raw PMI (no logarithm)
+            raw_pmi = self.calculate_raw_pmi(
+                self.measurements['SCHEDULING_THREAD_KURTOSIS'],
+                self.measurements['SCHEDULING_THREAD_SKEWNESS'],
+                self.measurements['SCHEDULING_THREAD_VARIANCE']
+            )
+            self.measurements['PHYSICAL_MACHINE_INDEX'] = float(raw_pmi)
             
             return thread_timings
         except Exception as e:
@@ -270,6 +354,8 @@ class VMTestMeasurements:
     
     def measure_multiprocessing_scheduling(self):
         """Multiprocessing scheduling measurements"""
+        print("Measuring multiprocessing scheduling patterns...")
+        
         try:
             proc_timings = []
             
@@ -280,7 +366,7 @@ class VMTestMeasurements:
                 queue.put(result)
             
             # Run multiprocessing tests
-            for _ in range(self.iterations // 20):  # Even fewer iterations
+            for _ in range(self.iterations // 20):  # Even fewer iterations for multiprocessing
                 queue = multiprocessing.Queue()
                 processes = []
                 
@@ -306,17 +392,13 @@ class VMTestMeasurements:
             self.measurements['SCHEDULING_MULTIPROC_SKEWNESS'] = float(self.skewness(proc_timings))
             self.measurements['SCHEDULING_MULTIPROC_KURTOSIS'] = float(self.kurtosis(proc_timings))
             
-            # Calculate Physical Machine Index (PMI) for multiprocessing
-            # PMI = log(Kurtosis * Skewness / Variance)
-            if self.measurements['SCHEDULING_MULTIPROC_VARIANCE'] > 0:
-                numerator = self.measurements['SCHEDULING_MULTIPROC_KURTOSIS'] * self.measurements['SCHEDULING_MULTIPROC_SKEWNESS']
-                if numerator > 0:
-                    pmi = math.log10(numerator / self.measurements['SCHEDULING_MULTIPROC_VARIANCE'])
-                    self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = float(pmi)
-                else:
-                    self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = -10.0  # Very low value indicates VM
-            else:
-                self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = 0.0
+            # Calculate raw PMI for multiprocessing (no logarithm)
+            raw_pmi = self.calculate_raw_pmi(
+                self.measurements['SCHEDULING_MULTIPROC_KURTOSIS'],
+                self.measurements['SCHEDULING_MULTIPROC_SKEWNESS'],
+                self.measurements['SCHEDULING_MULTIPROC_VARIANCE']
+            )
+            self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = float(raw_pmi)
             
             return proc_timings
         except Exception as e:
@@ -330,64 +412,32 @@ class VMTestMeasurements:
             self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] = 0.0
             return []
     
-    def measure_consecutive_timing(self):
-        """Consecutive operation timing measurements"""
-        try:
-            consecutive_timings = []
-            
-            # Measure timing of consecutive operations
-            for _ in range(self.iterations // 2):
-                times = []
-                for _ in range(10):  # 10 consecutive operations
-                    start = time.perf_counter_ns()
-                    # Simple operation
-                    _ = sum(range(1000))
-                    end = time.perf_counter_ns()
-                    times.append(end - start)
-                
-                # Calculate mean of consecutive operations
-                consecutive_timings.append(self.mean(times))
-            
-            self.measurements['TIMING_CONSECUTIVE_MEAN'] = float(self.mean(consecutive_timings))
-            self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = float(self.variance(consecutive_timings))
-            self.measurements['TIMING_CONSECUTIVE_CV'] = float(self.coefficient_of_variation(consecutive_timings))
-            self.measurements['TIMING_CONSECUTIVE_SKEWNESS'] = float(self.skewness(consecutive_timings))
-            self.measurements['TIMING_CONSECUTIVE_KURTOSIS'] = float(self.kurtosis(consecutive_timings))
-            
-            return consecutive_timings
-        except Exception as e:
-            print(f"Error in consecutive timing measurements: {e}")
-            # Set default values if measurement fails
-            self.measurements['TIMING_CONSECUTIVE_MEAN'] = 0.0
-            self.measurements['TIMING_CONSECUTIVE_VARIANCE'] = 0.0
-            self.measurements['TIMING_CONSECUTIVE_CV'] = 0.0
-            return []
-    
     def measure_cache_behavior(self):
-        """Cache-related measurements"""
+        """Cache behavior measurements"""
+        print("Measuring cache behavior patterns...")
+        
         try:
             cache_timings = []
             cache_miss_indicators = []
             
-            # Large array to stress cache (using list instead of numpy array)
-            array_size = 1024 * 1024  # 1M elements
-            data = [random.random() for _ in range(array_size)]
+            # Create large data array
+            cache_size = 1024 * 1024  # 1MB
+            data = [i * 0.1 for i in range(cache_size)]
             
-            # Cache-friendly access pattern
-            for _ in range(100):
+            # Cache-friendly access (sequential)
+            for _ in range(min(self.iterations, 100)):  # Limit iterations for cache tests
                 start = time.perf_counter_ns()
-                # Sequential access
-                total = sum(data)
+                total = sum(data[i] for i in range(0, len(data), 1000))
                 end = time.perf_counter_ns()
                 cache_timings.append(end - start)
             
-            # Cache-unfriendly access pattern
+            # Cache-unfriendly access (random)
+            import random
             indices = list(range(len(data)))
             random.shuffle(indices)
             
-            for _ in range(100):
+            for _ in range(min(self.iterations, 100)):
                 start = time.perf_counter_ns()
-                # Random access
                 total = 0
                 for i in range(0, len(indices), 1000):
                     total += data[indices[i]]
@@ -415,6 +465,8 @@ class VMTestMeasurements:
     
     def measure_memory_entropy(self):
         """Memory address entropy measurements"""
+        print("Measuring memory entropy patterns...")
+        
         try:
             addresses = []
             
@@ -446,146 +498,100 @@ class VMTestMeasurements:
             self.measurements['MEMORY_ADDRESS_ENTROPY'] = 0.0
             return []
     
-    def calculate_overall_metrics(self):
-        """Calculate overall/composite metrics"""
-        # Overall timing CV (average of all timing CVs)
-        timing_cvs = [
-            self.measurements.get('TIMING_BASIC_CV', 0),
-            self.measurements.get('TIMING_CONSECUTIVE_CV', 0)
-        ]
-        valid_timing_cvs = [cv for cv in timing_cvs if cv > 0]
-        self.measurements['OVERALL_TIMING_CV'] = float(self.mean(valid_timing_cvs)) if valid_timing_cvs else 0.0
+    def calculate_composite_measurements(self):
+        """Calculate composite measurements"""
+        print("Calculating composite measurements...")
         
-        # Overall scheduling CV (average of scheduling CVs)
-        scheduling_cvs = [
-            self.measurements.get('SCHEDULING_THREAD_CV', 0),
-            self.measurements.get('SCHEDULING_MULTIPROC_CV', 0)
-        ]
-        valid_scheduling_cvs = [cv for cv in scheduling_cvs if cv > 0]
-        self.measurements['OVERALL_SCHEDULING_CV'] = float(self.mean(valid_scheduling_cvs)) if valid_scheduling_cvs else 0.0
-    
-    def get_system_info(self):
-        """Collect system information"""
-        info = {
-            'platform': platform.platform(),
-            'processor': platform.processor(),
-            'python_version': platform.python_version(),
-            'cpu_count': multiprocessing.cpu_count(),
-            'timestamp': time.time()
-        }
+        # Overall timing CV
+        timing_cvs = []
+        if self.measurements.get('TIMING_BASIC_CV', 0) > 0:
+            timing_cvs.append(self.measurements['TIMING_BASIC_CV'])
+        if self.measurements.get('TIMING_CONSECUTIVE_CV', 0) > 0:
+            timing_cvs.append(self.measurements['TIMING_CONSECUTIVE_CV'])
         
-        # Add psutil information if available
-        if PSUTIL_AVAILABLE:
-            try:
-                info['cpu_freq'] = psutil.cpu_freq().current if psutil.cpu_freq() else 0
-                info['memory_total'] = psutil.virtual_memory().total
-            except Exception as e:
-                print(f"Warning: Could not get psutil info: {e}")
-                info['cpu_freq'] = 0
-                info['memory_total'] = 0
-        else:
-            info['cpu_freq'] = 0
-            info['memory_total'] = 0
-            info['psutil_available'] = False
+        self.measurements['OVERALL_TIMING_CV'] = float(self.mean(timing_cvs) if timing_cvs else 0.0)
         
-        return info
+        # Overall scheduling CV
+        scheduling_cvs = []
+        if self.measurements.get('SCHEDULING_THREAD_CV', 0) > 0:
+            scheduling_cvs.append(self.measurements['SCHEDULING_THREAD_CV'])
+        if self.measurements.get('SCHEDULING_MULTIPROC_CV', 0) > 0:
+            scheduling_cvs.append(self.measurements['SCHEDULING_MULTIPROC_CV'])
+        
+        self.measurements['OVERALL_SCHEDULING_CV'] = float(self.mean(scheduling_cvs) if scheduling_cvs else 0.0)
     
     def run_all_measurements(self):
-        """Run all measurement tests"""
-        print("Starting VMTEST measurements...")
-        
-        print("1. Basic timing measurements...")
-        self.measure_timing_basic()
-        
-        print("2. Thread scheduling measurements...")
-        self.measure_thread_scheduling()
-        
-        print("3. Multiprocessing scheduling measurements...")
-        self.measure_multiprocessing_scheduling()
-        
-        print("4. Consecutive timing measurements...")
+        """Run all measurements without any VM detection logic"""
+        print("Starting system measurements...")
+        print(f"Platform: {platform.system()}")
+        print(f"Python version: {platform.python_version()}")
+        print(f"CPU count: {os.cpu_count()}")
+        print(f"Iterations: {self.iterations}")
+        print()
+
+        self.gather_system_info()
+        self.measure_basic_timing()
         self.measure_consecutive_timing()
-        
-        print("5. Cache behavior measurements...")
+        self.measure_thread_scheduling()
+        self.measure_multiprocessing_scheduling()
         self.measure_cache_behavior()
-        
-        print("6. Memory entropy measurements...")
         self.measure_memory_entropy()
-        
-        print("7. Calculating overall metrics...")
-        self.calculate_overall_metrics()
-        
-        print("Measurements complete!")
+        self.calculate_composite_measurements()
+
+        print("\nMeasurements complete!")
     
-    def export_results(self):
-        """Export results in standardized format"""
-        results = {
-            'system_info': self.get_system_info(),
-            'measurements': self.measurements,
-            'vm_indicators': self.analyze_vm_indicators()
+    def get_results(self):
+        """Get results as dictionary"""
+        return {
+            "system_info": self.system_info,
+            "measurements": self.measurements,
+            "timestamp": datetime.now().isoformat(),
+            "language": "python",
+            "version": "1.0.0"
         }
-        return results
     
-    def analyze_vm_indicators(self):
-        """Analyze measurements for VM indicators"""
-        indicators = {}
+    def save_results_json(self, filename=None):
+        """Save pure measurements to JSON file"""
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"measurements_{timestamp}.json"
         
-        # High scheduling variance indicates VM (Lin et al.)
-        if 'SCHEDULING_THREAD_CV' in self.measurements:
-            indicators['high_scheduling_variance'] = self.measurements['SCHEDULING_THREAD_CV'] > 0.15
+        results = self.get_results()
         
-        # Low PMI indicates VM
-        if 'PHYSICAL_MACHINE_INDEX' in self.measurements:
-            indicators['low_pmi'] = self.measurements['PHYSICAL_MACHINE_INDEX'] < 1.0
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=2)
         
-        # Low multiproc PMI indicates VM
-        if 'MULTIPROC_PHYSICAL_MACHINE_INDEX' in self.measurements:
-            indicators['low_multiproc_pmi'] = self.measurements['MULTIPROC_PHYSICAL_MACHINE_INDEX'] < 1.0
-        
-        # High cache miss ratio indicates VM
-        if 'CACHE_MISS_RATIO' in self.measurements:
-            indicators['high_cache_miss'] = self.measurements['CACHE_MISS_RATIO'] > 0.5
-        
-        # Low memory entropy indicates VM
-        if 'MEMORY_ADDRESS_ENTROPY' in self.measurements:
-            indicators['low_memory_entropy'] = self.measurements['MEMORY_ADDRESS_ENTROPY'] < 2.0
-        
-        # Overall VM likelihood
-        vm_score = sum(1 for v in indicators.values() if v) / len(indicators) if indicators else 0
-        indicators['vm_likelihood_score'] = vm_score
-        indicators['likely_vm'] = vm_score > 0.5
-        
-        return indicators
+        print(f"Measurements saved to: {filename}")
+        return filename
+    
+    def print_results_json(self):
+        """Print results in JSON format"""
+        results = self.get_results()
+        print(json.dumps(results, indent=2))
+
 
 def main():
+    """Main function"""
     # Parse command line arguments
     iterations = 1000
     if len(sys.argv) > 1:
         try:
             iterations = int(sys.argv[1])
+            if iterations <= 0:
+                iterations = 1000
         except ValueError:
-            print(f"Invalid iterations: {sys.argv[1]}, using default: 1000")
+            print("Invalid iterations argument, using default 1000")
+            iterations = 1000
     
-    # Create measurement instance
-    vmtest = VMTestMeasurements(iterations=iterations)
-    
-    # Run measurements
+    # Create and run VMTest
+    vmtest = VMTest(iterations=iterations)
     vmtest.run_all_measurements()
     
-    # Export results
-    results = vmtest.export_results()
-    
-    # Print results in JSON format
-    print("\n" + "="*60)
-    print("VMTEST MEASUREMENT RESULTS")
-    print("="*60)
-    print(json.dumps(results, indent=2))
-    
-    # Save to file
-    filename = f"vmtest_results_{int(time.time())}.json"
-    with open(filename, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to: {filename}")
+    # Output results
+    print("\nResults:")
+    print("=" * 50)
+    vmtest.print_results_json()
+
 
 if __name__ == "__main__":
     main()
