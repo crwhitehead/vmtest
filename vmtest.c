@@ -24,7 +24,7 @@
 #include <sys/sysctl.h>
 #endif
 
-#define ITERATIONS 1000
+#define ITERATIONS 10000
 #define THREAD_COUNT 4
 #define CACHE_SIZE (1024 * 1024)  // 1MB
 // Utility function to get high-resolution time in nanoseconds
@@ -1059,7 +1059,93 @@ void save_results_json(const char *filename) {
     fclose(fp);
     printf("\nResults saved to: %s\n", filename);
 }
+// Add this function to vmtest.c after the existing save_results_json function
 
+// Print results to stdout in JSON format (for unified runner)
+void print_results_json() {
+    printf("{\n");
+    
+    // System information
+    printf("  \"system_info\": {\n");
+    printf("    \"platform\": \"%s\",\n", system_info.platform);
+    printf("    \"hostname\": \"%s\",\n", system_info.hostname);
+    printf("    \"machine\": \"%s\",\n", system_info.machine);
+    printf("    \"cpu_count\": %d,\n", system_info.cpu_count);
+    printf("    \"total_memory\": %ld,\n", system_info.total_memory);
+    printf("    \"cpu_freq_mhz\": %ld,\n", system_info.cpu_freq_mhz);
+    printf("    \"timestamp\": %ld\n", time(NULL));
+    printf("  },\n");
+    
+    // Measurements
+    printf("  \"measurements\": {\n");
+    printf("    \"TIMING_BASIC_MEAN\": %.6f,\n", measurements.timing_basic_mean);
+    printf("    \"TIMING_BASIC_VARIANCE\": %.6f,\n", measurements.timing_basic_variance);
+    printf("    \"TIMING_BASIC_CV\": %.6f,\n", measurements.timing_basic_cv);
+    printf("    \"TIMING_BASIC_SKEWNESS\": %.6f,\n", measurements.timing_basic_skewness);
+    printf("    \"TIMING_BASIC_KURTOSIS\": %.6f,\n", measurements.timing_basic_kurtosis);
+    printf("    \"SCHEDULING_THREAD_MEAN\": %.6f,\n", measurements.scheduling_thread_mean);
+    printf("    \"SCHEDULING_THREAD_VARIANCE\": %.6f,\n", measurements.scheduling_thread_variance);
+    printf("    \"SCHEDULING_THREAD_CV\": %.6f,\n", measurements.scheduling_thread_cv);
+    printf("    \"SCHEDULING_THREAD_SKEWNESS\": %.6f,\n", measurements.scheduling_thread_skewness);
+    printf("    \"SCHEDULING_THREAD_KURTOSIS\": %.6f,\n", measurements.scheduling_thread_kurtosis);
+    printf("    \"PHYSICAL_MACHINE_INDEX\": %.6f,\n", measurements.physical_machine_index);
+    printf("    \"SCHEDULING_MULTIPROC_MEAN\": %.6f,\n", measurements.scheduling_multiproc_mean);
+    printf("    \"SCHEDULING_MULTIPROC_VARIANCE\": %.6f,\n", measurements.scheduling_multiproc_variance);
+    printf("    \"SCHEDULING_MULTIPROC_CV\": %.6f,\n", measurements.scheduling_multiproc_cv);
+    printf("    \"SCHEDULING_MULTIPROC_SKEWNESS\": %.6f,\n", measurements.scheduling_multiproc_skewness);
+    printf("    \"SCHEDULING_MULTIPROC_KURTOSIS\": %.6f,\n", measurements.scheduling_multiproc_kurtosis);
+    printf("    \"TIMING_CONSECUTIVE_MEAN\": %.6f,\n", measurements.timing_consecutive_mean);
+    printf("    \"TIMING_CONSECUTIVE_VARIANCE\": %.6f,\n", measurements.timing_consecutive_variance);
+    printf("    \"TIMING_CONSECUTIVE_CV\": %.6f,\n", measurements.timing_consecutive_cv);
+    printf("    \"TIMING_CONSECUTIVE_SKEWNESS\": %.6f,\n", measurements.timing_consecutive_skewness);
+    printf("    \"TIMING_CONSECUTIVE_KURTOSIS\": %.6f,\n", measurements.timing_consecutive_kurtosis);
+    printf("    \"CACHE_ACCESS_RATIO\": %.6f,\n", measurements.cache_access_ratio);
+    printf("    \"CACHE_MISS_RATIO\": %.6f,\n", measurements.cache_miss_ratio);
+    printf("    \"MEMORY_ADDRESS_ENTROPY\": %.6f,\n", measurements.memory_address_entropy);
+    printf("    \"OVERALL_TIMING_CV\": %.6f,\n", measurements.overall_timing_cv);
+    printf("    \"OVERALL_SCHEDULING_CV\": %.6f\n", measurements.overall_scheduling_cv);
+    printf("  },\n");
+    
+    // VM indicators (calculate inline like other implementations)
+    printf("  \"vm_indicators\": {\n");
+    
+    // High scheduling variance indicates VM (Lin et al.)
+    int high_scheduling_variance = measurements.scheduling_thread_cv > 0.15;
+    printf("    \"high_scheduling_variance\": %s,\n", high_scheduling_variance ? "true" : "false");
+    
+    // Low PMI indicates VM
+    int low_pmi = measurements.physical_machine_index < 1.0;
+    printf("    \"low_pmi\": %s,\n", low_pmi ? "true" : "false");
+    
+    // High timing variance
+    int high_timing_variance = measurements.timing_basic_cv > 0.1;
+    printf("    \"high_timing_variance\": %s,\n", high_timing_variance ? "true" : "false");
+    
+    // Abnormal cache ratio
+    int abnormal_cache_ratio = measurements.cache_access_ratio > 2.0;
+    printf("    \"abnormal_cache_ratio\": %s,\n", abnormal_cache_ratio ? "true" : "false");
+    
+    // Low memory entropy
+    int low_memory_entropy = measurements.memory_address_entropy < 3.0;
+    printf("    \"low_memory_entropy\": %s,\n", low_memory_entropy ? "true" : "false");
+    
+    // Calculate VM likelihood score
+    int indicator_count = 5;
+    int positive_indicators = high_scheduling_variance + low_pmi + high_timing_variance + 
+                             abnormal_cache_ratio + low_memory_entropy;
+    double vm_likelihood_score = (double)positive_indicators / indicator_count;
+    
+    printf("    \"vm_likelihood_score\": %.6f,\n", vm_likelihood_score);
+    printf("    \"likely_vm\": %s\n", vm_likelihood_score > 0.5 ? "true" : "false");
+    printf("  },\n");
+    
+    // Metadata
+    printf("  \"timestamp\": \"%ld\",\n", time(NULL));
+    printf("  \"language\": \"C\",\n");
+    printf("  \"version\": \"1.0.0\"\n");
+    
+    printf("}\n");
+}
 int main(int argc, char *argv[]) {
     printf("VMTEST - Virtual Machine Detection Tool\n");
     printf("======================================\n\n");
@@ -1085,6 +1171,7 @@ int main(int argc, char *argv[]) {
     
     printf("\nMeasurements complete!\n");
     
+    print_results_json();
     // Print results
     print_measurements();
     
