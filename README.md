@@ -1,67 +1,84 @@
-# VMTEST - Virtual Machine Detection Tool
+# VMTEST - System Measurements Tool
 
-A comprehensive toolkit for detecting virtualized environments through timing, scheduling, cache, and memory measurements based on peer-reviewed academic research.
+A comprehensive toolkit for extracting timing, scheduling, cache, and memory measurements from computing systems based on peer-reviewed academic research.
 
 ## Overview
 
-VMTEST implements state-of-the-art virtual machine detection techniques validated by academic research, achieving up to 97%+ detection accuracy. The tool performs statistical analysis on various system behaviors that differ between physical and virtual machines, focusing on measurements that are difficult for hypervisors to mask or modify.
+VMTEST is a **pure measurements tool** that extracts raw statistical data from various system behaviors without making any judgments or interpretations about the underlying environment. The tool implements measurement techniques validated by academic research to collect comprehensive timing and performance data that can be used for system analysis, performance profiling, or research purposes.
 
 ## Key Features
 
-- **Research-Based Detection**: Implements techniques from peer-reviewed papers with published accuracy rates
-- **Statistical Analysis**: Uses variance, coefficient of variation, skewness, and kurtosis to detect VM-specific patterns
-- **Cross-Platform**: Available in both Python and C implementations
-- **No Dependencies**: Python version runs without numpy/scipy; C version uses only standard libraries
-- **Comprehensive Measurements**: Analyzes timing, scheduling, cache behavior, and memory patterns
-- **JSON Output**: Standardized output format for easy integration and analysis
+- **Pure Measurements Only**: Extracts raw data without VM detection logic or interpretations
+- **Research-Based Techniques**: Implements measurement methods from peer-reviewed academic papers
+- **Comprehensive Statistical Analysis**: Calculates mean, variance, coefficient of variation, skewness, and kurtosis
+- **Cross-Platform**: Available in Python, C, JavaScript (Node.js), and Ruby implementations
+- **No External Dependencies**: All implementations use only standard libraries
+- **Standardized Output**: JSON format for easy integration and further analysis
+- **Academic Foundation**: Based on established research methodologies
 
 ## Measurement Categories
 
-### 1. Thread Scheduling Analysis (97%+ Accuracy)
-Based on **Lin, Z., Yang, X., & Zhang, D. (2021)**. "Detection of Virtual Machines Based on Thread Scheduling" 
+### 1. Thread Scheduling Measurements
+Based on **Lin, Z., Yang, X., & Zhang, D. (2021)**. "Detection of Virtual Machines Based on Thread Scheduling"
 
-**Key measurements:**
-- `SCHEDULING_THREAD_VARIANCE`: Higher in VMs due to two-level scheduling
-- `SCHEDULING_THREAD_CV`: Coefficient of variation for normalization
-- `SCHEDULING_THREAD_SKEWNESS`: Lower in VMs (distribution shape)
-- `SCHEDULING_THREAD_KURTOSIS`: Lower in VMs (tail behavior)
-- `PHYSICAL_MACHINE_INDEX`: Composite metric (PMI < 1.0 indicates VM)
+**Collected measurements:**
+- `SCHEDULING_THREAD_MEAN`: Average thread execution time
+- `SCHEDULING_THREAD_VARIANCE`: Thread timing variance
+- `SCHEDULING_THREAD_CV`: Coefficient of variation for thread timing
+- `SCHEDULING_THREAD_SKEWNESS`: Distribution asymmetry of thread timing
+- `SCHEDULING_THREAD_KURTOSIS`: Distribution tail behavior of thread timing
+- `PHYSICAL_MACHINE_INDEX`: Raw PMI calculation (kurtosis × skewness / variance)
 
-**Research Quote**: *"The probability distribution of execution time of a piece of CPU-bound code in virtual machines has higher variance along with lower kurtosis and skewness"*
-
-### 2. Basic Timing Measurements (80-90% Accuracy)
+### 2. Basic Timing Measurements
 Based on **Franklin, J., et al. (2008)**. "Remote detection of virtual machine monitors with fuzzy benchmarking"
 
-**Key measurements:**
+**Collected measurements:**
 - `TIMING_BASIC_MEAN`: Average execution time for CPU-bound operations
-- `TIMING_BASIC_VARIANCE`: Timing consistency analysis
-- `TIMING_BASIC_CV`: Normalized timing variations
-- `TIMING_CONSECUTIVE_MEAN`: Overhead in consecutive operations
+- `TIMING_BASIC_VARIANCE`: Variance in basic timing measurements
+- `TIMING_BASIC_CV`: Coefficient of variation for basic timing
+- `TIMING_BASIC_SKEWNESS`: Distribution asymmetry of basic timing
+- `TIMING_BASIC_KURTOSIS`: Distribution tail behavior of basic timing
 
-### 3. Cache Behavior Analysis (85-90% Accuracy)
+### 3. Extended Timing Measurements
+**Implementation Note**: The following measurements are implementation extensions without specific academic validation, included for comprehensive timing analysis:
+
+**Collected measurements:**
+- `TIMING_CONSECUTIVE_MEAN`: Average time for two consecutive CPU-bound operations
+- `TIMING_CONSECUTIVE_VARIANCE`: Variance in consecutive operation timing
+- `TIMING_CONSECUTIVE_CV`: Coefficient of variation for consecutive timing
+- `TIMING_CONSECUTIVE_SKEWNESS`: Distribution asymmetry of consecutive timing
+- `TIMING_CONSECUTIVE_KURTOSIS`: Distribution tail behavior of consecutive timing
+
+**Note**: These measure the timing of running two identical CPU-bound tasks back-to-back, compared to single operations. While not based on specific research, they may reveal different scheduling or caching behaviors.
+
+### 4. Multiprocessing Measurements
+Extension of scheduling analysis to process-level operations:
+
+**Collected measurements:**
+- `SCHEDULING_MULTIPROC_MEAN`: Average multiprocess execution time
+- `SCHEDULING_MULTIPROC_VARIANCE`: Multiprocess timing variance
+- `SCHEDULING_MULTIPROC_CV`: Coefficient of variation for multiprocess timing
+- `SCHEDULING_MULTIPROC_SKEWNESS`: Distribution asymmetry of multiprocess timing
+- `SCHEDULING_MULTIPROC_KURTOSIS`: Distribution tail behavior of multiprocess timing
+- `MULTIPROC_PHYSICAL_MACHINE_INDEX`: Raw PMI for multiprocess scheduling
+
+### 5. Cache Behavior Measurements
 Based on **Zhang, N., et al. (2020)**. "Detecting hardware-assisted virtualization with inconspicuous features"
 
-**Key measurements:**
+**Collected measurements:**
 - `CACHE_ACCESS_RATIO`: Ratio of cache-unfriendly to cache-friendly access times
-- `CACHE_MISS_RATIO`: Normalized difference indicating cache efficiency
+- `CACHE_MISS_RATIO`: Normalized difference indicating cache behavior patterns
 
-**Research Insight**: VMs show different cache patterns due to additional page table layers and context switches.
-
-### 4. Memory Address Entropy (70-85% Accuracy)
+### 6. Memory Address Measurements
 Based on **Shacham, H., et al. (2004)**. "On the effectiveness of address-space randomization"
 
-**Key measurements:**
+**Collected measurements:**
 - `MEMORY_ADDRESS_ENTROPY`: Shannon entropy of memory allocation patterns
 
-**Research Insight**: VMs often have reduced ASLR (Address Space Layout Randomization) entropy.
-
-### 5. Multiprocessing Patterns
-Extension of thread scheduling research to process-level analysis:
-- `SCHEDULING_MULTIPROC_CV`: Process scheduling variations
-- `SCHEDULING_MULTIPROC_SKEWNESS`: Process timing distribution shape
-- `SCHEDULING_MULTIPROC_KURTOSIS`: Process timing distribution tail behavior
-- `MULTIPROC_PHYSICAL_MACHINE_INDEX`: PMI calculated for process scheduling
-- Similar statistical patterns to thread scheduling, validates findings at process level
+### 7. Composite Measurements
+**Collected measurements:**
+- `OVERALL_TIMING_CV`: Combined coefficient of variation across timing measurements
+- `OVERALL_SCHEDULING_CV`: Combined coefficient of variation across scheduling measurements
 
 ## Installation and Usage
 
@@ -69,8 +86,7 @@ Extension of thread scheduling research to process-level analysis:
 
 **Requirements:**
 - Python 3.6+
-- psutil (optional, for system information)
-- No numpy/scipy required!
+- psutil (optional, for enhanced system information)
 
 **Usage:**
 ```bash
@@ -85,13 +101,13 @@ python3 vmtest.py 5000
 
 **Compilation:**
 ```bash
-# Linux (may need -lrt on older systems)
+# Linux
 gcc -o vmtest vmtest.c -lpthread -lm -lrt -O2
 
 # macOS
 gcc -o vmtest vmtest.c -lpthread -lm -O2
 
-# If -lrt causes issues, try without it
+# If -lrt causes issues, omit it
 gcc -o vmtest vmtest.c -lpthread -lm -O2
 ```
 
@@ -100,108 +116,148 @@ gcc -o vmtest vmtest.c -lpthread -lm -O2
 ./vmtest
 ```
 
+### JavaScript (Node.js) Version
+
+**Requirements:**
+- Node.js 12+
+
+**Usage:**
+```bash
+# Run with default iterations
+node vmtest.js
+
+# Run with custom iterations
+node vmtest.js 2000
+```
+
+### Ruby Version
+
+**Requirements:**
+- Ruby 2.5+
+
+**Usage:**
+```bash
+# Run with default iterations
+ruby vmtest.rb
+
+# Run with custom iterations
+ruby vmtest.rb 2000
+```
+
 ## Output Format
 
-Both versions produce JSON output with three main sections:
+All implementations produce JSON output with two main sections:
 
 ```json
 {
   "system_info": {
     "platform": "Linux 5.15.0",
+    "hostname": "measurement-host",
     "cpu_count": 8,
     "memory_total": 17179869184,
-    ...
+    "timestamp": 1641234567
   },
   "measurements": {
-    "SCHEDULING_THREAD_VARIANCE": 0.052,
-    "SCHEDULING_THREAD_CV": 0.18,
+    "TIMING_BASIC_MEAN": 0.0234,
+    "TIMING_BASIC_VARIANCE": 0.0012,
+    "TIMING_BASIC_CV": 0.148,
+    "TIMING_BASIC_SKEWNESS": 1.23,
+    "TIMING_BASIC_KURTOSIS": 4.56,
+    "TIMING_CONSECUTIVE_MEAN": 0.0245,
+    "TIMING_CONSECUTIVE_VARIANCE": 0.0015,
+    "TIMING_CONSECUTIVE_CV": 0.155,
+    "TIMING_CONSECUTIVE_SKEWNESS": 1.18,
+    "TIMING_CONSECUTIVE_KURTOSIS": 4.78,
+    "SCHEDULING_THREAD_MEAN": 0.0456,
+    "SCHEDULING_THREAD_VARIANCE": 0.0023,
+    "SCHEDULING_THREAD_CV": 0.165,
     "SCHEDULING_THREAD_SKEWNESS": 1.15,
     "SCHEDULING_THREAD_KURTOSIS": 5.09,
-    "PHYSICAL_MACHINE_INDEX": 0.85,
-    "SCHEDULING_MULTIPROC_VARIANCE": 0.048,
-    "SCHEDULING_MULTIPROC_CV": 0.17,
-    "SCHEDULING_MULTIPROC_SKEWNESS": 1.18,
+    "PHYSICAL_MACHINE_INDEX": 2.34,
+    "SCHEDULING_MULTIPROC_MEAN": 0.0523,
+    "SCHEDULING_MULTIPROC_VARIANCE": 0.0028,
+    "SCHEDULING_MULTIPROC_CV": 0.171,
+    "SCHEDULING_MULTIPROC_SKEWNESS": 1.12,
     "SCHEDULING_MULTIPROC_KURTOSIS": 5.23,
-    "MULTIPROC_PHYSICAL_MACHINE_INDEX": 0.92,
-    ...
-  },
-  "vm_indicators": {
-    "high_scheduling_variance": true,
-    "low_pmi": true,
-    "vm_likelihood_score": 0.75,
-    "likely_vm": true
+    "MULTIPROC_PHYSICAL_MACHINE_INDEX": 2.67,
+    "CACHE_ACCESS_RATIO": 1.45,
+    "CACHE_MISS_RATIO": 0.23,
+    "MEMORY_ADDRESS_ENTROPY": 3.45,
+    "OVERALL_TIMING_CV": 0.151,
+    "OVERALL_SCHEDULING_CV": 0.168
   }
 }
 ```
 
-## VM Detection Indicators
+## Understanding the Measurements
 
-The tool analyzes five primary indicators:
+### Statistical Metrics
 
-1. **High Scheduling Variance** (CV > 0.15)
-   - Most reliable indicator based on Lin et al. research
-   - Caused by two-level scheduling in virtualized environments
+Each measurement category includes five key statistical metrics:
 
-2. **Low Thread Physical Machine Index** (PMI < 1.0)
-   - Composite metric: log(Kurtosis × Skewness / Variance)
-   - Strong indicator validated by research for thread scheduling
+1. **Mean**: Average value of the measurements
+2. **Variance**: Measure of how spread out the measurements are
+3. **Coefficient of Variation (CV)**: Normalized measure of variability (standard deviation / mean)
+4. **Skewness**: Measure of asymmetry in the distribution
+5. **Kurtosis**: Measure of tail behavior in the distribution
 
-3. **Low Multiprocess Physical Machine Index** (PMI < 1.0)
-   - Same calculation applied to process-level scheduling
-   - Validates thread findings at a different scheduling level
+### Physical Machine Index (PMI)
 
-4. **High Cache Miss Ratio** (> 0.5)
-   - VMs show different cache behavior due to virtualization overhead
-   - Additional page table layers affect cache performance
+The PMI is calculated as: **PMI = (kurtosis × skewness) / variance**
 
-5. **Low Memory Entropy** (< 2.0)
-   - Reduced randomness in memory allocation patterns
-   - Often indicates restricted ASLR in VMs
+This is a raw mathematical calculation without any threshold-based interpretations.
 
-## Academic References
+### Entropy Calculations
 
-1. **Lin, Z., Song, Y., & Wang, J. (2021)**. "Detection of Virtual Machines Based on Thread Scheduling." *Artificial Intelligence and Security*, pp. 180-190. Springer.
-   - Primary source for scheduling-based detection
-   - 97.2% accuracy for physical machines, 100% for VMs
+Memory address entropy uses Shannon entropy to measure the randomness in memory allocation patterns.
 
-2. **Franklin, J., et al. (2008)**. "Remote detection of virtual machine monitors with fuzzy benchmarking." *ACM SIGOPS Operating Systems Review*, 42(3), 83-92.
-   - Foundational timing-based detection research
+## Use Cases
 
-3. **Ferrie, P. (2007)**. "Attacks on Virtual Machine Emulators." *Symantec Advanced Threat Research*.
-   - Classic VM detection techniques including TLB timing
+- **System Performance Analysis**: Baseline measurements for system characterization
+- **Research**: Academic studies requiring detailed timing and scheduling data
+- **Benchmarking**: Comparative analysis between different systems or configurations
+- **System Monitoring**: Long-term performance trend analysis
+- **Academic Validation**: Reproducing results from published research papers
 
-4. **Zhang, N., et al. (2020)**. "Detecting hardware-assisted virtualization with inconspicuous features." *IEEE Transactions on Information Forensics and Security*.
-   - Cache-based detection methods
+## Implementation Notes
 
-5. **Brengel, M., Backes, M., & Rossow, C. (2016)**. "Detecting Hardware-Assisted Virtualization." *DIMVA 2016*.
-   - Context switch and cache side effects
+### Statistical Accuracy
 
-6. **Liston, T., & Skoudis, E. (2006)**. "On the cutting edge: Thwarting virtual machine detection." *SANS Institute*.
-   - Early timing anomaly research
+All implementations use bias-corrected formulas for skewness and kurtosis calculations to ensure statistical accuracy with finite sample sizes.
 
-## Limitations and Considerations
+### Cross-Platform Compatibility
 
-1. **Hardware Dependency**: Results vary based on CPU architecture and system load
-2. **Modern Hypervisors**: Newer virtualization technologies may evade some detection methods
-3. **Container Detection**: Designed for VMs, not containers (Docker, LXC)
-4. **Statistical Nature**: Results are probabilistic, not deterministic
-5. **Evasion**: Sophisticated VMs may implement countermeasures
+The tool is designed to work across different operating systems and architectures while maintaining measurement consistency.
 
-## Future Work
+### Performance Considerations
 
-- Implementation of VMEXIT timing measurements (currently missing)
-- Support for ARM architecture-specific detection
-- Integration with continuous monitoring systems
-- Machine learning models for improved accuracy
-- Detection of specific hypervisor types
+- Default iteration count is 1000 for balance between accuracy and execution time
+- Multiprocessing measurements use reduced iteration counts for performance
+- Cache measurements limit array sizes to prevent excessive memory usage
 
-## Contributing
+## Data Interpretation
 
-Contributions are welcome! Areas of interest:
+**Important**: This tool provides raw measurements only. Any interpretation, analysis, or decision-making based on these measurements should be performed by separate analysis tools or frameworks.
+
+The measurements can be used for:
+- Statistical analysis and modeling
+- Machine learning feature extraction
+- System comparison studies
+- Performance baseline establishment
+- Research validation and reproduction
+
+## Research Foundation
+
+This tool implements measurement techniques from multiple peer-reviewed academic papers, ensuring that the collected data follows established scientific methodologies. The measurements are designed to be reproducible and consistent across different implementations and platforms.
+
+## Future Development
+
+Areas for potential enhancement:
 - Additional measurement techniques from recent research
-- Performance optimizations
-- Support for more platforms
-- Improved statistical analysis methods
+- Performance optimizations for high-frequency measurements
+- Support for more specialized hardware measurements
+- Enhanced statistical analysis methods
+- Integration with analysis frameworks
 
 ## License
 
@@ -209,4 +265,4 @@ This project implements techniques from academic research. Please cite the relev
 
 ## Disclaimer
 
-This tool is for legitimate security research and system administration purposes only. It should not be used to circumvent security measures or violate terms of service.
+This tool is designed for legitimate system analysis, research, and performance measurement purposes. The measurements collected are statistical in nature and should be interpreted appropriately within the context of your specific use case.
