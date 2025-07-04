@@ -235,20 +235,40 @@ The tool is designed to work across different operating systems and architecture
 - Multiprocessing measurements use reduced iteration counts for performance
 - Cache measurements limit array sizes to prevent excessive memory usage
 
-## Data Interpretation
+## Data Interpretation and Use Cases
 
 **Important**: This tool provides raw measurements only. Any interpretation, analysis, or decision-making based on these measurements should be performed by separate analysis tools or frameworks.
 
-The measurements can be used for:
-- Statistical analysis and modeling
-- Machine learning feature extraction
-- System comparison studies
-- Performance baseline establishment
-- Research validation and reproduction
+### Primary Use Cases
+- **Statistical analysis and modeling** - Raw data for mathematical analysis
+- **Machine learning feature extraction** - Input features for ML models
+- **System comparison studies** - Comparative analysis between different systems
+- **Performance baseline establishment** - System characterization and profiling
+- **Academic research validation** - Reproducing and extending published research
 
-## Research Foundation
+### Research Applications
+- **Validated measurements** can be used to reproduce published research results
+- **Experimental measurements** are suitable for exploratory research and hypothesis testing
+- **Composite measurements** provide aggregate system characteristics
+- **Cross-platform consistency** enables comparative studies across different environments
 
-This tool implements measurement techniques from multiple peer-reviewed academic papers, ensuring that the collected data follows established scientific methodologies. The measurements are designed to be reproducible and consistent across different implementations and platforms.
+## Research Foundation and Validation
+
+### Academic Basis
+This tool implements measurement techniques from multiple peer-reviewed academic papers:
+
+1. **Lin, Z., Yang, X., & Zhang, D. (2021)** - Thread scheduling analysis with 97%+ accuracy
+2. **Franklin, J., et al. (2008)** - Basic timing measurements for system characterization  
+3. **Zhang, N., et al. (2020)** - Cache behavior analysis techniques
+4. **Shacham, H., et al. (2004)** - Memory address entropy measurements
+
+### Implementation Extensions
+Some measurements are implementation extensions without specific academic validation:
+- **Consecutive timing measurements** - Extension of basic timing analysis
+- **Multiprocessing measurements** - Extension of thread scheduling research to process level
+- **Composite measurements** - Aggregate metrics for overall system characterization
+
+These extensions follow the same statistical methodologies as the research-based techniques but should be interpreted as exploratory measurements rather than validated detection methods.
 
 ## Future Development
 

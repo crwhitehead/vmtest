@@ -3,7 +3,7 @@ class Array
   def sum(initial = 0)
     inject(initial, :+)
   end unless method_defined?(:sum)
-endls
+end
 # VMtest - System Measurements Tool (Pure Measurements Only)
 # Extracts timing, scheduling, cache, and memory measurements
 # Based on research from Lin et al. (2021) and other academic sources
