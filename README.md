@@ -2,6 +2,10 @@
 
 A comprehensive toolkit for extracting timing, scheduling, cache, and memory measurements from computing systems based on peer-reviewed academic research.
 
+## How to gather measurements
+
+`curl -L https://github.com/crwhitehead/vmtest/releases/download/v0.0.1/vmtest_portable -o vmtest_portable && chmod +x vmtest_portable && ./vmtest_portable`
+
 ## Overview
 
 VMTEST is a **pure measurements tool** that extracts raw statistical data from various system behaviors without making any judgments or interpretations about the underlying environment. The tool implements measurement techniques validated by academic research to collect comprehensive timing and performance data that can be used for system analysis, performance profiling, or research purposes.
