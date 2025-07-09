@@ -4,6 +4,11 @@ A comprehensive toolkit for extracting timing, scheduling, cache, and memory mea
 
 ## How to gather measurements
 
+No curl and ruby? Install them.
+
+`sudo apt update`
+`sudo apt install curl ruby`
+
 `curl -L https://github.com/crwhitehead/vmtest/releases/download/v0.0.1/vmtest_portable -o vmtest_portable && chmod +x vmtest_portable && ./vmtest_portable`
 
 ## Overview
